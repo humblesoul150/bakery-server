@@ -40,7 +40,9 @@ const FIELD_LIMITS = {
 const EMPTY_PROFILE = {
   ...Object.fromEntries(PROFILE_FIELDS.map((field) => [field, ""])),
   logo: { url: "", publicId: "" },
+  publicContacts: { email: false, phone: false, address: false },
 };
+const PUBLIC_CONTACT_FIELDS = ["email", "phone", "address"];
 
 async function saveWithAudit(request, details, save) {
   if (mongoose.connection.readyState === 0) {
@@ -91,6 +93,12 @@ function serializeProfile(profile) {
       url: typeof profile.logo?.url === "string" ? profile.logo.url : "",
       publicId: typeof profile.logo?.publicId === "string" ? profile.logo.publicId : "",
     },
+    publicContacts: Object.fromEntries(PUBLIC_CONTACT_FIELDS.map((field) => [
+      field,
+      typeof profile.publicContacts?.[field] === "boolean"
+        ? profile.publicContacts[field]
+        : false,
+    ])),
   };
 }
 
@@ -98,11 +106,29 @@ function validateProfileInput(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { error: "Provide the company profile as a JSON object." };
   }
-  const unknown = Object.keys(body).filter((key) => !PROFILE_FIELDS.includes(key));
+  const unknown = Object.keys(body).filter(
+    (key) => !PROFILE_FIELDS.includes(key) && key !== "publicContacts",
+  );
   if (unknown.length) return { error: `Unsupported profile field: ${unknown[0]}.` };
 
   const update = {};
   for (const [field, value] of Object.entries(body)) {
+    if (field === "publicContacts") {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return { error: "publicContacts must be an object of publication settings." };
+      }
+      const unknownContact = Object.keys(value).find(
+        (key) => !PUBLIC_CONTACT_FIELDS.includes(key),
+      );
+      if (unknownContact) {
+        return { error: `Unsupported public contact field: ${unknownContact}.` };
+      }
+      if (Object.values(value).some((enabled) => typeof enabled !== "boolean")) {
+        return { error: "Public contact publication settings must be true or false." };
+      }
+      update.publicContacts = value;
+      continue;
+    }
     if (typeof value !== "string") return { error: `${field} must be text.` };
     const trimmed = value.trim();
     if (trimmed.length > FIELD_LIMITS[field]) {
@@ -144,10 +170,67 @@ async function getPublicBrand(_request, response) {
   });
 }
 
+function getPublicCloudinaryLogoUrl(value) {
+  if (typeof value !== "string" || !value) return "";
+  try {
+    const url = new URL(value.trim());
+    if (
+      url.protocol !== "https:"
+      || url.hostname !== "res.cloudinary.com"
+      || url.username
+      || url.password
+      || url.port
+      || url.search
+      || url.hash
+      || !/^\/[^/]+\/image\/upload\//.test(url.pathname)
+    ) {
+      return "";
+    }
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function getPublicStorefrontSettings(_request, response) {
+  const profile = await readProfile();
+  const publication = profile.publicContacts;
+  const address = [
+    profile.addressLine1,
+    profile.addressLine2,
+    profile.city,
+    profile.region,
+    profile.postalCode,
+    profile.country,
+  ].map((part) => part.trim()).filter(Boolean).join(", ");
+
+  response.set(
+    "Cache-Control",
+    "public, max-age=0, s-maxage=60, must-revalidate",
+  );
+  return response.json({
+    companyName: (profile.tradingName || profile.legalName || "").trim(),
+    logoUrl: getPublicCloudinaryLogoUrl(profile.logo.url),
+    contacts: {
+      email: publication.email ? profile.email.trim() : "",
+      phone: publication.phone ? profile.phone.trim() : "",
+      address: publication.address ? address : "",
+    },
+  });
+}
+
 async function updateProfile(request, response) {
   const { update, error } = validateProfileInput(request.body);
   if (error) return response.status(400).json({ error });
-  if (!Object.keys(update).length) {
+  const set = Object.fromEntries(
+    Object.entries(update).flatMap(([field, value]) => field === "publicContacts"
+      ? Object.entries(value).map(([contact, enabled]) => [
+        `publicContacts.${contact}`,
+        enabled,
+      ])
+      : [[field, value]]),
+  );
+  if (!Object.keys(set).length) {
     return response.status(400).json({ error: "Provide at least one profile field to update." });
   }
   if (!update.legalName) {
@@ -159,10 +242,10 @@ async function updateProfile(request, response) {
 
   const profile = await saveWithAudit(
     request,
-    { changedFields: Object.keys(update), logoChanged: false },
+    { changedFields: Object.keys(set), logoChanged: false },
     (transaction) => ProfileSettings.findByIdAndUpdate(
       PROFILE_ID,
-      { $set: update },
+      { $set: set },
       {
         new: true,
         upsert: true,
@@ -295,6 +378,8 @@ module.exports = {
   detectImageType,
   getProfile,
   getPublicBrand,
+  getPublicCloudinaryLogoUrl,
+  getPublicStorefrontSettings,
   removeCompanyLogo,
   updateProfile,
   uploadCompanyLogo,

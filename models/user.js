@@ -63,6 +63,10 @@ const userSchema = new mongoose.Schema(
     },
     lastActive: { type: Date },
     suspensionReason: { type: String, trim: true, maxlength: 500 },
+    failedLoginHistory: { type: [Date], default: [] },
+    lockoutHistory: { type: [Date], default: [] },
+    lockedUntil: { type: Date },
+    manualUnlockRequiredAt: { type: Date },
   },
   {
     timestamps: true,

@@ -114,12 +114,26 @@ test("password reset rejects unauthenticated requests", async () => {
   assert.equal((await response.json()).error, "Authentication required.");
 });
 
+test("manual lockout unlock rejects unauthenticated requests", async () => {
+  const response = await fetch(
+    `${baseUrl}/api/users/507f1f77bcf86cd799439011/unlock`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Account verified" }),
+    },
+  );
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error, "Authentication required.");
+});
+
 test("session and security-settings APIs reject unauthenticated requests", async () => {
   const requests = [
     ["/api/sessions", "GET"],
     ["/api/sessions/activity", "POST"],
     ["/api/security-settings", "GET"],
     ["/api/security-settings", "PUT"],
+    ["/api/security-settings/login-protection", "PATCH"],
     ["/api/audit", "GET"],
     ["/api/audit/users/507f1f77bcf86cd799439011", "GET"],
   ];

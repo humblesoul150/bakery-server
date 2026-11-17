@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   getSettings,
+  updateLoginProtection,
   updateSettings,
 } = require("../controllers/securitySettingsController");
 const {
@@ -14,5 +15,6 @@ const superAdminOnly = [authenticate, requireSuperAdmin, requirePasswordChanged]
 
 router.get("/", superAdminOnly, getSettings);
 router.put("/", superAdminOnly, updateSettings);
+router.patch("/login-protection", superAdminOnly, updateLoginProtection);
 
 module.exports = router;

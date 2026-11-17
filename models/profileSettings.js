@@ -21,6 +21,11 @@ const profileSettingsSchema = new mongoose.Schema(
       url: { type: String, default: "" },
       publicId: { type: String, default: "" },
     },
+    publicContacts: {
+      email: { type: Boolean, default: false },
+      phone: { type: Boolean, default: false },
+      address: { type: Boolean, default: false },
+    },
   },
   { timestamps: true },
 );

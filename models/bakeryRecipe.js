@@ -13,6 +13,7 @@ const ingredientSchema = new mongoose.Schema(
 const bakeryRecipeSchema = new mongoose.Schema(
   {
     familyId: { type: mongoose.Schema.Types.ObjectId, ref: "BakeryProductFamily", required: true, index: true },
+    seedKey: { type: String, trim: true, maxlength: 120, default: undefined },
     version: { type: Number, required: true, min: 1, validate: Number.isInteger },
     batchYield: { type: Number, required: true, min: 0.000001 },
     yieldUnit: { type: String, required: true, trim: true, maxlength: 40 },
@@ -21,6 +22,22 @@ const bakeryRecipeSchema = new mongoose.Schema(
       required: true,
       validate: [(items) => items.length > 0, "A bakery recipe must contain at least one ingredient."],
     },
+    sourceReferences: {
+      type: [{ type: String, trim: true, maxlength: 500 }],
+      default: [],
+      validate: [
+        (items) => items.length <= 10 && items.every((source) => {
+          try {
+            const parsed = new URL(source);
+            return parsed.protocol === "https:" && Boolean(parsed.hostname);
+          } catch {
+            return false;
+          }
+        }),
+        "A recipe may have up to 10 HTTPS source references.",
+      ],
+    },
+    formulationNote: { type: String, trim: true, maxlength: 500, default: "" },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   },
   {
@@ -37,6 +54,7 @@ const bakeryRecipeSchema = new mongoose.Schema(
 );
 
 bakeryRecipeSchema.index({ familyId: 1, version: 1 }, { unique: true });
+bakeryRecipeSchema.index({ seedKey: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.models.BakeryRecipe ||
   mongoose.model("BakeryRecipe", bakeryRecipeSchema);

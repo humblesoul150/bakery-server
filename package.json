@@ -1,5 +1,5 @@
 {
-  "name": "anli-server",
+  "name": "bakery-server",
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
@@ -9,7 +9,9 @@
     "migrate:raw-material-lots": "node scripts/migrateRawMaterialLots.js",
     "migrate:finished-stock-packs": "node scripts/migrateFinishedStockToPacks.js",
     "migrate:bakery-catalog": "node scripts/migrateBakeryCatalog.js",
+    "seed:sourdough-catalog": "node scripts/seedSourdoughCatalog.js",
     "migrate:production-material-usage-index": "node scripts/migrateProductionMaterialUsageRunIndex.js",
+    "backfill:bakery-first-published-at": "node scripts/backfillBakeryFirstPublishedAt.js",
     "backfill:credit-payment-receipts": "node scripts/backfillCreditPaymentReceipts.js",
     "start": "node server.js",
     "dev": "node --watch server.js"
@@ -26,6 +28,7 @@
     "express-validator": "^7.2.1",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "mongodb-connection-string-url": "^3.0.2",
     "mongoose": "^8.14.1",
     "multer": "^1.4.5-lts.2",
     "pg": "^8.16.3",

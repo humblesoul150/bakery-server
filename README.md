@@ -11,6 +11,32 @@
 
 For a local MongoDB installation, configure and start a replica set before running the API. For example, start `mongod` with `--replSet rs0`, then run `rs.initiate()` once in `mongosh`. Use a replica-set connection string such as `mongodb://127.0.0.1:27017/anli?replicaSet=rs0` for `DB_URL`.
 
+## Sourdough catalog seed
+
+The sourdough dataset contains at least three core product profiles in each of 17 categories, plus three flavour profiles for one suitable product in each category. Prices are proposed integer UGX estimates; imports contain no images and leave profiles unpublished and inactive. Each family includes an illustrative measured recipe, source reference, and ingredient statement. Recipe quantities and local prices require bakery-owner review and test bakes before the inactive family is activated for production.
+
+The single catalog bundle is `scripts/data/sourdoughCatalogImport.json`. It includes the families, sellable variants, recipes, ingredient names/units, and raw-material definitions. The guarded seeder reads this file, resolves database IDs and creator/audit references, and writes linked records transactionally. Do not import this bundle directly into one MongoDB collection with `mongoimport`.
+
+Run the offline validation first:
+
+```powershell
+npm run seed:sourdough-catalog
+```
+
+For read-only reconciliation against a development/test/staging database, set `DB_URL` and pass its exact database name:
+
+```powershell
+npm run seed:sourdough-catalog -- --check-database --confirm-database bakery_staging
+```
+
+Review the report for raw-material unit/code conflicts and missing materials. To import, use an active Super Admin ID, explicitly allow creation of missing material definitions, and confirm the exact non-production database. Newly added raw materials have no opening stock, balances, or movements; no existing product, material, stock, or recipe is overwritten. The importer refuses a production database and rejects partial/conflicting prior imports.
+
+```powershell
+npm run seed:sourdough-catalog -- --apply --confirm-database bakery_staging --actor-id 507f1f77bcf86cd799439099 --create-missing-materials
+```
+
+Applying writes missing raw-material definitions and families in short MongoDB transactions (up to five families per transaction), with an audit event for each committed batch. If a later batch fails, earlier batches remain committed; rerun the seeder after resolving the reported failure, and it will skip complete matching families. The family remains inactive, unpublished, and image-free after import; adding the profiles does not publish or make them available for production. Review each formula, ingredient declaration/allergens, shelf-life policy, and UGX price before activating or publishing a family. The “products from leftover sourdough bread” recipes use day-old bread as an ingredient; receiving recovered bread into raw-material stock remains a separate operational step.
+
 ## Create the first Super Admin
 
 Set `BOOTSTRAP_SECRET` in the server environment, then call `POST /api/auth/bootstrap-super-admin` once with the matching `X-Bootstrap-Secret` header and a JSON body containing `name`, `email`, and an initial `password` (at least 8 characters and no more than 72 UTF-8 bytes). For example, from PowerShell after setting `$env:BOOTSTRAP_SECRET`:
@@ -44,6 +70,18 @@ The client reports activity only in response to foreground user interaction and 
 
 The move from JWT cookies to opaque server-managed sessions invalidates existing sign-in cookies once the new server version is deployed; users must sign in again.
 
+## Failed sign-in lockout
+
+`GET /api/security-settings` returns both session and sign-in protection policies. Super Admins update the sign-in policy with `PATCH /api/security-settings/login-protection`; defaults are five failed attempts in a rolling 15-minute window, a 15-minute temporary lock, and manual unlock after five temporary lockouts in a rolling 24-hour window. The policy also controls whether lockout notifications are queued. Policy changes and lock transitions are audited.
+
+Failed-attempt and temporary-lockout timestamps are stored separately from account `status`. A correct password for a temporarily locked account receives `423 ACCOUNT_LOCKED` with the expiry; a manually locked account receives the same status with instructions to contact the responsible manager. Incorrect passwords keep the generic credential error. Existing temporary/manual locks are not cleared by disabling the policy, changing account status, or resetting a password.
+
+Responsible-manager routing is ordinary staff → Human Resource → General Manager → Super Admin; HR → General Manager → Super Admin; General Manager/Admin → Super Admin; Super Admin → another active Super Admin. In-app notifications are queued for each temporary lock and manual-unlock escalation. When the designated manager tier has no active account, the next tier can unlock only as a reason-required, audited override. A Super Admin cannot unlock their own manual lock. If the sole active Super Admin is locked, run `node scripts/breakGlassUnlockAccount.js` from the restricted database-operator environment. It prompts for the target ID, operator name, and reason; it only proceeds when no active peer Super Admin exists and records `account.lockout_unlocked` in the same transaction. Open an incident record first and retain its reference in the required reason.
+
+`POST /api/users/:id/unlock` requires a reason and is separately authorized against the current manager hierarchy. `GET /api/users` exposes lockout state only to account managers and includes an unlock action only for the currently authorized manager. Unlocking clears the failed-attempt and escalation history but leaves suspension/deactivation, roles, passwords, and sessions unchanged. Disabling automatic lockout does not clear an already active temporary or manual lock.
+
+The login IP rate limit in `app.js` is an additional, separate safeguard; it is process-local unless deployed with a shared rate-limit store. Multi-instance deployments should configure a shared store or enforce an equivalent edge limit. Per-account lockout state itself is persisted in MongoDB and is shared across API instances.
+
 ## Temporary Super Admin department access
 
 Super Admin accounts temporarily inherit department-level access across authenticated operational features, including read and write actions. Authentication, the required password change, administrator-only security settings, data validation, audit records, transaction guarantees, assigned employee self-service scope, and sequential approval/actor-separation rules remain enforced. The client displays a temporary-access indicator for Super Admins.
@@ -60,9 +98,9 @@ Audit metadata is bounded and sanitized; it excludes passwords, temporary passwo
 
 ## Company profile and logo
 
-The company profile is stored as a single MongoDB `ProfileSettings` document with the stable ID `global`. Authenticated users who have changed their temporary password can read the organization profile used by company documents. Only Super Admins can update it or manage the logo. `GET /api/profile-settings/public-brand` exposes only the display name and logo URL for signed-out workspace branding.
+The company profile is stored as a single MongoDB `ProfileSettings` document with the stable ID `global`. Authenticated users who have changed their temporary password can read the organization profile used by company documents. Super Admins and General Managers can update it or manage the logo. `GET /api/profile-settings/public-brand` exposes only the display name and logo URL for signed-out workspace branding.
 
-Update profile fields with `PUT /api/profile-settings`. Upload a logo as multipart form data to `POST /api/profile-settings/logo` using the `logo` field; PNG, JPEG, and WebP files up to 2 MB are accepted after server-side signature validation. The backend uploads the image to Cloudinary and stores only `logo.url` and `logo.publicId` in MongoDB. Remove a logo with `DELETE /api/profile-settings/logo`. Replaced/deleted Cloudinary assets are cleaned up after the database update; cleanup errors are logged for operator follow-up.
+Update profile fields and the default-off `publicContacts.email`, `publicContacts.phone`, and `publicContacts.address` switches with `PUT /api/profile-settings`. These switches control whether the matching saved value may appear on the public bakery website. Upload a logo as multipart form data to `POST /api/profile-settings/logo` using the `logo` field; PNG, JPEG, and WebP files up to 2 MB are accepted after server-side signature validation. The backend uploads the image to Cloudinary and stores only `logo.url` and `logo.publicId` in MongoDB. Remove a logo with `DELETE /api/profile-settings/logo`. Replaced/deleted Cloudinary assets are cleaned up after the database update; cleanup errors are logged for operator follow-up.
 
 Company profile edits are audited as `company.profile_updated`. New documents use the current company identity; existing invoice seller snapshots and issued documents are not rewritten when the profile changes. The company name and logo shown to signed-out users are limited to public branding fields.
 
@@ -206,14 +244,22 @@ Existing production-run sales dispatches are retained as historical ledger movem
 
 ### Bakery production workflow
 
-The bakery workflow is available under `/api/production/bakery`; existing beverage catalog, tank recipes, and production history remain readable. The beverage-specific raw-material posting/editing workflow is retired. The Production Management screen has a separate **Bakery production** workspace for family/SKU setup, versioned recipes, per-SKU packaging requirements, batch start/completion, measured ingredient and packaging consumption, and finished-stock lot review.
+The bakery workflow is available under `/api/production/bakery`; existing beverage catalog, tank recipes, and production history remain readable as legacy records. The beverage-specific raw-material posting/editing workflow is retired. The primary Production Management screen uses bakery family/SKU setup, versioned recipes, per-SKU packaging requirements, batch start/completion, measured ingredient and packaging consumption, finished-stock lot management, and batch/stock history. Sales and Orders retain their existing product relationships.
 
-- `GET/POST /api/production/bakery/families` lists or creates product families and their initial SKU variants. `PATCH /api/production/bakery/families/:id` updates family metadata; `POST /api/production/bakery/families/:id/variants` adds a sellable SKU.
-- Bakery family images are uploaded through `POST /api/uploads/bakery-product-image/signed`, available to Production Managers and Inventory Managers for an existing family. The signed upload is limited to JPEG, PNG, and WebP images up to 5 MB in the bakery product folder. Save the returned Cloudinary URL and public ID in `storefront.images` with alt text and sort order. Replacing or removing a managed image queues its prior Cloudinary ID for cleanup; `POST /api/production/bakery/families/:id/images/cleanup` retries pending deletions. The family list reports pending cleanup counts. This stores staff-managed metadata only; it does not add a public catalog or website endpoint.
+- Legacy beverage product, recipe, run, and finished-stock write endpoints remain available for compatibility but return `X-Legacy-Workflow: beverage` and `X-Recommended-Workflow: /api/production/bakery`. The migrated Production Management UI does not call those write endpoints; their existing records are not converted or deleted.
+- `GET/POST /api/production/bakery/families` lists or creates product families and their initial SKU variants. `PATCH /api/production/bakery/families/:id` updates family metadata; `POST /api/production/bakery/families/:id/variants` adds a sellable SKU; `PATCH /api/production/bakery/variants/:id` updates a variant name, whole-UGX price, or active status without rewriting its SKU or historical snapshots.
+- Bakery family images are uploaded through `POST /api/uploads/bakery-product-image/signed`, available to Production Managers and Inventory Managers for an existing family. The signed upload is limited to JPEG, PNG, and WebP images up to 5 MB in the bakery product folder. Save the returned Cloudinary URL and public ID in `storefront.images` with alt text and sort order, preserving the public ID exactly as returned. A valid family-scoped public ID may be bare (`family-<familyId>-...`) or include the exact `anli/bakery/products/` folder prefix; other folders and IDs for another family are rejected. Replacing or removing a managed image queues its prior Cloudinary ID for cleanup; `POST /api/production/bakery/families/:id/images/cleanup` retries pending deletions. The family list reports pending cleanup counts.
+- `PATCH /api/production/bakery/families/:id` accepts storefront publication settings. Publishing requires an active family, unique public slug, description, and at least one active priced variant. A primary image is optional; when present it must use HTTPS. `storefront.firstPublishedAt` is set on first publication and retained when the family is unpublished and republished; published families cannot be deactivated.
+- `GET /api/storefront/catalog` is public and returns only published, active bakery families, their active priced variants, and storefront fields. It derives the `new` badge from the first-publication month in Africa/Kampala and `bestseller` from the top three families with at least five distinct qualifying sales in the rolling 30-day window. The response is a public catalog projection; it does not expose staff-only production or inventory details.
+- `GET /api/storefront/settings` is public and returns only the company display name, an HTTPS Cloudinary logo URL, and contact values explicitly enabled for publication. Unpublished or blank contact values are returned empty; legal, tax, registration, and Cloudinary public ID fields are never included.
+- Existing published families can be backfilled with `npm run backfill:bakery-first-published-at` (dry run). Review its output before applying with `npm run backfill:bakery-first-published-at -- --apply`; missing dates are filled from `createdAt`, and records are not overwritten.
 - `PUT /api/production/bakery/families/:id/recipe` creates a new immutable recipe version using quantities in each raw material's base unit and an expected batch yield.
 - `GET/POST /api/production/bakery/batches` lists or starts a batch against the current recipe version. `POST /api/production/bakery/batches/:id/complete` requires actual quantities for every recipe ingredient and finished output quantities. It atomically posts raw-material movements, batch snapshots, finished-stock lot(s), and the audit event. Request idempotency keys protect both batch creation and completion retries.
 - Sellable SKU variants may define packaging quantities per sale unit. Batch completion deducts packaging according to actual finished output and snapshots the consumed lots alongside ingredient allocations.
-- `GET /api/production/bakery/lots` lists batch-linked lots; `?expiring=true` filters to active lots due within two days or already past their date label. `POST /api/production/bakery/lots/:id/write-off` records a reasoned, idempotent write-off of unreserved sale units, appends an immutable lot movement and audit event, and resolves expiry alerts when the lot is depleted. The actual lot expiry date is based on the family shelf-life default rounded up to a whole calendar day; a different date requires a recorded reason.
+- `GET /api/production/bakery/lots` lists production, manual-receipt, and migrated lots; `?expiring=true` filters to active lots due within two days or already past their date label. `GET /api/production/bakery/lots/movements` reads the append-only finished-stock movement history.
+- Inventory Managers may use `POST /api/production/bakery/lots/receipts` to create a traceable manual receipt lot, and `POST /api/production/bakery/lots/:id/adjustments` to append a reasoned increase/decrease to an existing lot. Receipts capture production date, receipt date, date-label expiry, SKU, location, reference, reason, and idempotency key; expired stock cannot be received. Adjustments cannot increase expired or written-off lots, go back before the latest movement, or reduce reserved stock.
+- Production Managers and Inventory Managers may use `POST /api/production/bakery/lots/:id/write-off` to record a reasoned, idempotent write-off of unreserved sale units. Each stock action appends a movement and audit event; expiry alerts resolve when the lot is depleted or written off. The actual production-lot expiry date is based on the family shelf-life default rounded up to a whole calendar day; a different date requires a recorded reason.
+- Finished-stock history never converts legacy beverage balances. Historical beverage raw-material usage stays in a separate read-only view; new bakery ingredient and packaging use is shown from completed batch snapshots and is not posted twice.
 
 The expiry worker scans lots at server startup and daily using Africa/Kampala calendar dates. It creates one in-app alert per lot at two days, one day, on the label date, and after the date. Notifications go to the assigned responsible user, or to Production Manager, Inventory Manager, Admin, and Super Admin roles when no user is assigned. They link to the staff production workspace. Alert records are resolved when the lot is depleted or written off; the scanner also reconciles alerts against lot status.
 

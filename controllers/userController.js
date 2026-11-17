@@ -2,7 +2,11 @@ const crypto = require("node:crypto");
 const mongoose = require("mongoose");
 const User = require("../models/user");
 const RoleClaim = require("../models/roleClaim");
-const { toPublicUser } = require("../lib/userDto");
+const { toAccountManagementUser, toPublicUser } = require("../lib/userDto");
+const {
+  canUnlockAccount,
+  findActiveLockoutManagers,
+} = require("../lib/accountLockout");
 const audit = require("../lib/audit");
 const {
   canAssignRoles,
@@ -79,11 +83,83 @@ function handleDuplicate(error, response) {
 
 async function listUsers(request, response) {
   const users = await User.find().sort({ name: 1, email: 1 });
+  const activeManagers = users
+    .filter((user) => user.status === "Active")
+    .map((user) => ({
+      _id: user._id,
+      roles: user.roles,
+      status: user.status,
+    }));
   return response.json({
     users: users
-      .filter((user) => canManageAccount(request.authUser, user))
-      .map(toPublicUser),
+      .filter((user) =>
+        canManageAccount(request.authUser, user)
+        || canUnlockAccount(request.authUser, user, activeManagers).allowed,
+      )
+      .map((user) => toAccountManagementUser(
+        user,
+        canUnlockAccount(request.authUser, user, activeManagers).allowed,
+      )),
   });
+}
+
+async function unlockUserAccount(request, response) {
+  if (!validateUserId(request.params.id)) {
+    return response.status(400).json({ error: "Invalid user id." });
+  }
+  const reason = typeof request.body?.reason === "string" ? request.body.reason.trim() : "";
+  if (!reason) {
+    return response.status(400).json({ error: "A reason is required to unlock this account." });
+  }
+  if (reason.length > 500) {
+    return response.status(400).json({ error: "Unlock reason must be 500 characters or fewer." });
+  }
+
+  const session = await mongoose.startSession();
+  let updated;
+  try {
+    await session.withTransaction(async () => {
+      const target = await User.findById(request.params.id).session(session);
+      if (!target) throw httpError(404, "User not found.");
+      if (!target.manualUnlockRequiredAt) {
+        throw httpError(409, "This account does not require a manual unlock.");
+      }
+
+      const activeManagers = await findActiveLockoutManagers(session);
+      const authorization = canUnlockAccount(request.authUser, target, activeManagers);
+      if (!authorization.allowed) {
+        throw httpError(403, "You are not the responsible manager for this account.");
+      }
+
+      target.failedLoginHistory = [];
+      target.lockoutHistory = [];
+      target.lockedUntil = undefined;
+      target.manualUnlockRequiredAt = undefined;
+      await target.save({ session });
+      await audit.recordAudit({
+        request,
+        eventType: "account.lockout_unlocked",
+        outcome: "success",
+        target,
+        reason: "manager_unlock",
+        details: {
+          unlockReason: reason,
+          managerRole: authorization.role,
+          managerOverride: authorization.override,
+        },
+        transaction: session,
+      });
+      updated = target;
+    });
+    return response.json({
+      user: toAccountManagementUser(updated, false),
+    });
+  } catch (error) {
+    if (error.statusCode) return response.status(error.statusCode).json({ error: error.message });
+    throw error;
+  } finally {
+    await session.endSession();
+  }
 }
 
 async function createUser(request, response) {
@@ -297,6 +373,7 @@ module.exports = {
   createUser,
   listUsers,
   resetUserPassword,
+  unlockUserAccount,
   updateUser,
   updateUserStatus,
 };

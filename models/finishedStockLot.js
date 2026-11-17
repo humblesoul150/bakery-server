@@ -4,7 +4,7 @@ const finishedStockLotSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, trim: true, maxlength: 100 },
     batchId: { type: mongoose.Schema.Types.ObjectId, ref: "BakeryProductionBatch", default: null, index: true },
-    sourceType: { type: String, enum: ["production", "legacy_migration"], default: "production", required: true },
+    sourceType: { type: String, enum: ["production", "manual_receipt", "legacy_migration"], default: "production", required: true },
     sourceReference: { type: String, trim: true, maxlength: 120 },
     familyId: { type: mongoose.Schema.Types.ObjectId, ref: "BakeryProductFamily", required: true, index: true },
     variantId: { type: mongoose.Schema.Types.ObjectId, ref: "BakeryProductVariant", required: true, index: true },
@@ -42,6 +42,10 @@ finishedStockLotSchema.index(
 );
 finishedStockLotSchema.index({ status: 1, expiryDate: 1, remainingQuantity: 1 });
 finishedStockLotSchema.index({ variantId: 1, expiryDate: 1, createdAt: 1 });
+finishedStockLotSchema.index(
+  { reference: 1 },
+  { unique: true, partialFilterExpression: { sourceType: "manual_receipt" } },
+);
 
 module.exports = mongoose.models.FinishedStockLot ||
   mongoose.model("FinishedStockLot", finishedStockLotSchema);

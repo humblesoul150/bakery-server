@@ -19,11 +19,20 @@ const { allocatePreorderOutput } = require("../lib/finishedStockLotOrders");
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const MAX_INGREDIENTS = 100;
 const MAX_OUTPUTS = 100;
+const BAKERY_PRODUCT_IMAGE_FOLDER = "anli/bakery/products";
+const BAKERY_PRODUCT_IMAGE_PUBLIC_ID_PATTERN = /^family-([a-f0-9]{24})-[a-z0-9-]+$/i;
+
+function bakeryProductImageFamilyId(publicId) {
+  if (typeof publicId !== "string") return null;
+  const folderPrefix = `${BAKERY_PRODUCT_IMAGE_FOLDER}/`;
+  const scopedPublicId = publicId.startsWith(folderPrefix)
+    ? publicId.slice(folderPrefix.length)
+    : publicId;
+  return BAKERY_PRODUCT_IMAGE_PUBLIC_ID_PATTERN.exec(scopedPublicId)?.[1]?.toLowerCase() ?? null;
+}
 
 function isBakeryProductImagePublicId(publicId, familyId) {
-  return typeof publicId === "string" &&
-    publicId.startsWith(`family-${familyId}-`) &&
-    /^family-[a-f0-9]{24}-[a-z0-9-]+$/i.test(publicId);
+  return bakeryProductImageFamilyId(publicId) === String(familyId).toLowerCase();
 }
 
 function isRecord(value) {
@@ -96,13 +105,13 @@ function validateStorefront(value) {
           return { error: "Cloudinary product images must use a valid HTTPS URL." };
         }
         if (parsedUrl.protocol !== "https:" || parsedUrl.hostname !== "res.cloudinary.com"
-          || !/^family-[a-f0-9]{24}-[a-z0-9-]+$/i.test(image.publicId)) {
-          return { error: "New product images must use a Cloudinary HTTPS URL and a family-scoped image ID." };
+          || !bakeryProductImageFamilyId(image.publicId)) {
+          return { error: "New product images must use a Cloudinary HTTPS URL and a family-scoped image ID in the bakery product folder." };
         }
       }
       images.push({
         url: image.url.trim(),
-        ...(image.publicId ? { publicId: image.publicId.trim() } : {}),
+        ...(image.publicId ? { publicId: image.publicId } : {}),
         altText: image.altText?.trim() ?? "",
         sortOrder: image.sortOrder ?? images.length,
       });
@@ -254,6 +263,28 @@ function validateFamily(body, partial = false) {
   return { value };
 }
 
+function validateVariantUpdate(body) {
+  const request = validateObject(body, ["name", "price", "active"]);
+  if (request.error) return request;
+  const value = {};
+  if (own(body, "name")) {
+    if (typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 160) {
+      return { error: "Variant name must be non-empty text of 160 characters or fewer." };
+    }
+    value.name = body.name.trim();
+  }
+  if (own(body, "price")) {
+    if (!Number.isSafeInteger(body.price) || body.price < 1) return { error: "Variant price must be a positive whole UGX amount." };
+    value.price = body.price;
+  }
+  if (own(body, "active")) {
+    if (typeof body.active !== "boolean") return { error: "Variant active must be true or false." };
+    value.active = body.active;
+  }
+  if (!Object.keys(value).length) return { error: "Provide at least one supported variant field." };
+  return { value };
+}
+
 function validateRecipe(body) {
   const request = validateObject(body, ["batchYield", "yieldUnit", "ingredients"]);
   if (request.error) return request;
@@ -385,6 +416,62 @@ function validateCompletion(body) {
   };
 }
 
+function validateManualLotReceipt(body) {
+  const request = validateObject(body, [
+    "familyId", "variantId", "quantity", "productionDate", "receiptDate", "expiryDate",
+    "location", "reference", "reason", "idempotencyKey",
+  ]);
+  if (request.error) return request;
+  const quantity = Number(body.quantity);
+  if (!validId(body.familyId) || !validId(body.variantId)
+    || !Number.isSafeInteger(quantity) || quantity < 1
+    || !validDate(body.productionDate) || body.productionDate > today()
+    || !validDate(body.receiptDate) || body.receiptDate < body.productionDate || body.receiptDate > today()
+    || !validDate(body.expiryDate) || body.expiryDate < body.productionDate || body.expiryDate < today()
+    || typeof body.location !== "string" || !body.location.trim() || body.location.trim().length > 100
+    || typeof body.reference !== "string" || !body.reference.trim() || body.reference.trim().length > 100
+    || typeof body.reason !== "string" || !body.reason.trim() || body.reason.trim().length > 300
+    || typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim() || body.idempotencyKey.length > 120) {
+    return { error: "Provide a valid family, variant, quantity, dates, location, reference, reason, and idempotency key." };
+  }
+  return {
+    value: {
+      familyId: String(new mongoose.Types.ObjectId(body.familyId)),
+      variantId: String(new mongoose.Types.ObjectId(body.variantId)),
+      quantity,
+      productionDate: body.productionDate,
+      receiptDate: body.receiptDate,
+      expiryDate: body.expiryDate,
+      location: body.location.trim(),
+      reference: body.reference.trim(),
+      reason: body.reason.trim(),
+      idempotencyKey: body.idempotencyKey.trim(),
+    },
+  };
+}
+
+function validateLotAdjustment(body) {
+  const request = validateObject(body, ["direction", "quantity", "date", "reason", "idempotencyKey"]);
+  if (request.error) return request;
+  const quantity = Number(body.quantity);
+  if (!["in", "out"].includes(body.direction)
+    || !Number.isSafeInteger(quantity) || quantity < 1
+    || !validDate(body.date) || body.date > today()
+    || typeof body.reason !== "string" || !body.reason.trim() || body.reason.trim().length > 300
+    || typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim() || body.idempotencyKey.length > 120) {
+    return { error: "Provide an in/out direction, positive whole quantity, valid date, reason, and idempotency key." };
+  }
+  return {
+    value: {
+      direction: body.direction,
+      quantity,
+      date: body.date,
+      reason: body.reason.trim(),
+      idempotencyKey: body.idempotencyKey.trim(),
+    },
+  };
+}
+
 function today() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Africa/Kampala",
@@ -414,6 +501,50 @@ function serialize(document) {
 
 function conflict(message) {
   return Object.assign(new Error(message), { statusCode: 409 });
+}
+
+function familyPublicationFieldError(record, storefront, active = record.active) {
+  if (!active) return "Activate the product family before publishing it.";
+  if (!storefront.slug) return "Add a storefront slug before publishing this product.";
+  if (!storefront.description?.trim()) {
+    return "Add a storefront description before publishing this product.";
+  }
+  const primaryImage = (storefront.images || []).find((image) => image.sortOrder === 0)
+    || (storefront.images || [])[0];
+  if (primaryImage) {
+    try {
+      if (new URL(primaryImage.url).protocol !== "https:") {
+        return "The primary product image must use HTTPS.";
+      }
+    } catch {
+      return "The primary product image URL is invalid.";
+    }
+  }
+  return "";
+}
+
+function firstPublishedAtValue({ wasPublished, firstPublishedAt, createdAt, now = new Date() }) {
+  if (firstPublishedAt) return firstPublishedAt;
+  return wasPublished ? createdAt || now : now;
+}
+
+async function validateFamilyPublication(record, storefront, session, active) {
+  const fieldError = familyPublicationFieldError(record, storefront, active);
+  if (fieldError) return fieldError;
+  const slugInUse = await BakeryProductFamily.exists({
+    _id: { $ne: record._id },
+    "storefront.slug": storefront.slug,
+  }).session(session);
+  if (slugInUse) return "This storefront slug is already in use.";
+  const hasActiveVariant = await BakeryProductVariant.exists({
+    familyId: record._id,
+    active: true,
+    price: { $gt: 0 },
+  }).session(session);
+  if (!hasActiveVariant) {
+    return "Add an active, priced sellable variant before publishing this product.";
+  }
+  return "";
 }
 
 function respondError(error, response) {
@@ -561,8 +692,9 @@ async function updateFamily(request, response) {
       }
       const updates = { ...value };
       let removedImageIds = [];
+      const currentStorefront = record.storefront?.toObject?.() || record.storefront || {};
+      const wasPublished = currentStorefront.published === true;
       if (updates.storefront) {
-        const currentStorefront = record.storefront?.toObject?.() || record.storefront || {};
         updates.storefront = { ...currentStorefront, ...updates.storefront };
         if (Array.isArray(value.storefront.images)) {
           const nextImageIds = new Set(value.storefront.images.map((image) => image.publicId).filter(Boolean));
@@ -585,16 +717,44 @@ async function updateFamily(request, response) {
           }
         }
       }
+      const willBePublished = updates.storefront?.published ?? wasPublished;
+      if (willBePublished) {
+        if (updates.active === false) {
+          throw conflict("Unpublish the product before deactivating its family.");
+        }
+        const nextStorefront = updates.storefront || currentStorefront;
+        const publicationError = await validateFamilyPublication(
+          record,
+          nextStorefront,
+          session,
+          updates.active ?? record.active,
+        );
+        if (publicationError) throw conflict(publicationError);
+        if (!nextStorefront.firstPublishedAt) {
+          nextStorefront.firstPublishedAt = firstPublishedAtValue({
+            wasPublished,
+            firstPublishedAt: nextStorefront.firstPublishedAt,
+            createdAt: record.createdAt,
+          });
+          updates.storefront = nextStorefront;
+        }
+      }
       Object.assign(record, updates, { updatedBy: request.authUser._id });
       await record.save({ session });
       await audit.recordAudit({
         request,
-        eventType: "production.bakery_family_updated",
+        eventType: wasPublished === willBePublished
+          ? "production.bakery_family_updated"
+          : willBePublished
+            ? "production.bakery_family_published"
+            : "production.bakery_family_unpublished",
         outcome: "success",
         resource: { type: "production_product", id: String(record._id) },
         details: {
           familyId: String(record._id),
           changedFields: Object.keys(updates),
+          published: willBePublished,
+          firstPublishedAt: record.storefront?.firstPublishedAt ?? null,
           removedProductImageCount: removedImageIds.length,
         },
         transaction: session,
@@ -680,6 +840,43 @@ async function addVariant(request, response) {
       return created;
     });
     return response.status(201).json({ variant: serialize(variant) });
+  } catch (error) {
+    return respondError(error, response);
+  }
+}
+
+async function updateVariant(request, response) {
+  if (!validId(request.params.id)) return response.status(400).json({ error: "Sellable variant ID is invalid." });
+  const { value, error } = validateVariantUpdate(request.body);
+  if (error) return response.status(400).json({ error });
+  try {
+    const variant = await inTransaction(async (session) => {
+      const current = await BakeryProductVariant.findById(request.params.id).session(session);
+      if (!current) throw conflict("The selected sellable variant no longer exists.");
+      const family = await BakeryProductFamily.findById(current.familyId).session(session);
+      if (!family) throw conflict("The product family for this variant no longer exists.");
+      if (value.active === false && family.storefront.published) {
+        const otherActiveVariant = await BakeryProductVariant.exists({
+          _id: { $ne: current._id },
+          familyId: family._id,
+          active: true,
+          price: { $gt: 0 },
+        }).session(session);
+        if (!otherActiveVariant) throw conflict("Unpublish the family or activate another priced variant before deactivating its last sellable SKU.");
+      }
+      Object.assign(current, value, { updatedBy: request.authUser._id });
+      await current.save({ session });
+      await audit.recordAudit({
+        request,
+        eventType: "production.bakery_variant_updated",
+        outcome: "success",
+        resource: { type: "production_product", id: String(family._id) },
+        details: { familyId: String(family._id), variantId: String(current._id), sku: current.sku, changes: Object.keys(value) },
+        transaction: session,
+      });
+      return current;
+    });
+    return response.json({ variant: serialize(variant) });
   } catch (error) {
     return respondError(error, response);
   }
@@ -1035,6 +1232,158 @@ async function completeBatch(request, response) {
   }
 }
 
+async function receiveLot(request, response) {
+  const validation = validateManualLotReceipt(request.body);
+  if (validation.error) return response.status(400).json({ error: validation.error });
+  const value = validation.value;
+  try {
+    const result = await inTransaction(async (session) => {
+      const existing = await FinishedStockLotMovement.findOne({ idempotencyKey: value.idempotencyKey }).session(session);
+      if (existing) {
+        const same = existing.type === "Manual receipt"
+          && existing.quantity === value.quantity
+          && existing.date === value.receiptDate
+          && existing.reference === value.reference
+          && existing.reason === value.reason;
+        if (!same) throw conflict("This stock receipt request key was already used with different details.");
+        const lot = await FinishedStockLot.findById(existing.lotId).session(session);
+        if (!lot || String(lot.familyId) !== value.familyId || String(lot.variantId) !== value.variantId
+          || lot.location !== value.location || lot.productionDate !== value.productionDate || lot.expiryDate !== value.expiryDate) {
+          throw conflict("This stock receipt request key was already used for a different lot.");
+        }
+        return { lot: serialize(lot), movement: serialize(existing), replayed: true };
+      }
+
+      const family = await BakeryProductFamily.findById(value.familyId).session(session);
+      const variant = await BakeryProductVariant.findOne({
+        _id: value.variantId,
+        familyId: value.familyId,
+        active: true,
+      }).session(session);
+      if (!family || !family.active || !variant) {
+        throw conflict("Manual receipts require an active bakery family and active variant belonging to that family.");
+      }
+      if (await FinishedStockLot.exists({ reference: value.reference }).session(session)) {
+        throw conflict("This finished-stock lot reference is already in use.");
+      }
+      const [lot] = await FinishedStockLot.create([{
+        reference: value.reference,
+        batchId: null,
+        sourceType: "manual_receipt",
+        sourceReference: value.reference,
+        familyId: family._id,
+        variantId: variant._id,
+        sku: variant.sku,
+        productName: variant.name,
+        saleUnit: variant.saleUnit,
+        unitsPerSaleUnit: variant.unitsPerSaleUnit,
+        location: value.location,
+        productionDate: value.productionDate,
+        expiryDate: value.expiryDate,
+        dateLabelType: family.dateLabelType,
+        producedQuantity: value.quantity,
+        remainingQuantity: value.quantity,
+        responsibleUserId: variant.responsibleUserId,
+        createdBy: request.authUser._id,
+      }], { session });
+      const [movement] = await FinishedStockLotMovement.create([{
+        lotId: lot._id,
+        type: "Manual receipt",
+        direction: "in",
+        quantity: value.quantity,
+        date: value.receiptDate,
+        reference: value.reference,
+        sourceType: "manual-receipt",
+        sourceId: lot._id,
+        idempotencyKey: value.idempotencyKey,
+        reason: value.reason,
+        actor: request.authUser._id,
+      }], { session });
+      await audit.recordAudit({
+        request,
+        eventType: "production.bakery_lot_received",
+        outcome: "success",
+        resource: { type: "production", id: String(lot._id), reference: lot.reference },
+        details: { lotId: String(lot._id), familyId: String(family._id), variantId: String(variant._id), quantity: value.quantity, location: value.location, reason: value.reason },
+        transaction: session,
+      });
+      return { lot: serialize(lot), movement: serialize(movement), replayed: false };
+    });
+    return response.status(200).json(result);
+  } catch (error) {
+    return respondError(error, response);
+  }
+}
+
+async function adjustLot(request, response) {
+  if (!validId(request.params.id)) return response.status(400).json({ error: "Finished-stock lot ID is invalid." });
+  const lotId = String(new mongoose.Types.ObjectId(request.params.id));
+  const validation = validateLotAdjustment(request.body);
+  if (validation.error) return response.status(400).json({ error: validation.error });
+  const value = validation.value;
+  const type = value.direction === "in" ? "Adjustment in" : "Adjustment out";
+  try {
+    const result = await inTransaction(async (session) => {
+      const existing = await FinishedStockLotMovement.findOne({ idempotencyKey: value.idempotencyKey }).session(session);
+      if (existing) {
+        const same = String(existing.lotId) === lotId
+          && existing.type === type
+          && existing.quantity === value.quantity
+          && existing.date === value.date
+          && existing.reason === value.reason;
+        if (!same) throw conflict("This stock adjustment request key was already used with different details.");
+        const lot = await FinishedStockLot.findById(existing.lotId).session(session);
+        return { lot: serialize(lot), movement: serialize(existing), replayed: true };
+      }
+      const lot = await FinishedStockLot.findById(lotId).session(session);
+      if (!lot || lot.status === "written_off") throw conflict("Only active or depleted finished-stock lots can be adjusted.");
+      const latestMovement = await FinishedStockLotMovement.findOne({ lotId: lot._id })
+        .sort({ date: -1, createdAt: -1 }).session(session).lean();
+      if (latestMovement && latestMovement.date > value.date) {
+        throw conflict("Adjustment date is earlier than the lot's latest stock movement.");
+      }
+      if (value.direction === "in") {
+        if (lot.expiryDate < today()) throw conflict("Expired finished-stock lots cannot receive additional stock.");
+        if (!Number.isSafeInteger(lot.remainingQuantity + value.quantity)) throw conflict("Adjustment quantity is outside the supported range.");
+        lot.remainingQuantity += value.quantity;
+        lot.status = "active";
+      } else {
+        const available = lot.remainingQuantity - lot.reservedQuantity;
+        if (value.quantity > available) throw conflict("Adjustment quantity exceeds unreserved finished stock.");
+        lot.remainingQuantity -= value.quantity;
+        if (lot.remainingQuantity === 0) lot.status = "depleted";
+      }
+      await lot.save({ session });
+      const [movement] = await FinishedStockLotMovement.create([{
+        lotId: lot._id,
+        type,
+        direction: value.direction,
+        quantity: value.quantity,
+        date: value.date,
+        reference: lot.reference,
+        sourceType: "manual-adjustment",
+        sourceId: lot._id,
+        idempotencyKey: value.idempotencyKey,
+        reason: value.reason,
+        actor: request.authUser._id,
+      }], { session });
+      if (lot.status !== "active") await resolveFinishedStockExpiryAlerts(lot._id, new Date(), session);
+      await audit.recordAudit({
+        request,
+        eventType: "production.bakery_lot_adjusted",
+        outcome: "success",
+        resource: { type: "production", id: String(lot._id), reference: lot.reference },
+        details: { lotId: String(lot._id), direction: value.direction, quantity: value.quantity, remainingQuantity: lot.remainingQuantity, reason: value.reason },
+        transaction: session,
+      });
+      return { lot: serialize(lot), movement: serialize(movement), replayed: false };
+    });
+    return response.status(200).json(result);
+  } catch (error) {
+    return respondError(error, response);
+  }
+}
+
 async function writeOffLot(request, response) {
   if (!validId(request.params.id)) return response.status(400).json({ error: "Finished-stock lot ID is invalid." });
   const lotId = String(new mongoose.Types.ObjectId(request.params.id));
@@ -1144,25 +1493,68 @@ async function listLots(request, response) {
   return response.json({ lots: lots.map(serialize) });
 }
 
+async function listLotMovements(request, response) {
+  const query = {};
+  if (request.query.from && !validDate(request.query.from)) return response.status(400).json({ error: "from must be a valid YYYY-MM-DD date." });
+  if (request.query.to && !validDate(request.query.to)) return response.status(400).json({ error: "to must be a valid YYYY-MM-DD date." });
+  if (request.query.from && request.query.to && request.query.from > request.query.to) {
+    return response.status(400).json({ error: "from must not be after to." });
+  }
+  if (request.query.from || request.query.to) {
+    query.date = {};
+    if (request.query.from) query.date.$gte = request.query.from;
+    if (request.query.to) query.date.$lte = request.query.to;
+  }
+  const limit = Math.max(1, Math.min(500, Number.parseInt(request.query.limit, 10) || 200));
+  const movements = await FinishedStockLotMovement.find(query)
+    .sort({ date: -1, createdAt: -1 })
+    .limit(limit)
+    .lean();
+  const lotIds = [...new Set(movements.map((movement) => String(movement.lotId)))];
+  const lots = await FinishedStockLot.find({ _id: { $in: lotIds } })
+    .select("reference sku productName saleUnit")
+    .lean();
+  const lotsById = new Map(lots.map((lot) => [String(lot._id), lot]));
+  return response.json({
+    movements: movements.map((movement) => ({
+      ...serialize(movement),
+      lotId: String(movement.lotId),
+      lotReference: lotsById.get(String(movement.lotId))?.reference ?? movement.reference,
+      sku: lotsById.get(String(movement.lotId))?.sku ?? "",
+      productName: lotsById.get(String(movement.lotId))?.productName ?? "",
+      saleUnit: lotsById.get(String(movement.lotId))?.saleUnit ?? "",
+    })),
+  });
+}
+
 module.exports = {
   addShelfLifeDays,
+  adjustLot,
   completeBatch,
   createBatch,
   createFamily,
   deleteUnattachedFamilyImage,
+  familyPublicationFieldError,
+  firstPublishedAtValue,
   listBatches,
   listFamilies,
   listLots,
+  listLotMovements,
+  receiveLot,
   writeOffLot,
   saveRecipe,
   updateFamily,
   retryFamilyImageCleanup,
   addVariant,
+  updateVariant,
   validateBatch,
   validateCompletion,
   validateFamily,
+  validateManualLotReceipt,
+  validateLotAdjustment,
   validateRecipe,
   validateStorefront,
+  validateVariantUpdate,
   validateVariants,
   isBakeryProductImagePublicId,
 };

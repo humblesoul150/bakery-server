@@ -1,12 +1,17 @@
 const assert = require("node:assert/strict");
+const mongoose = require("mongoose");
 const { test } = require("node:test");
 const { PassThrough } = require("node:stream");
 const cloudinaryConfig = require("../configs/cloudinary");
+const audit = require("../lib/audit");
 const ProfileSettings = require("../models/profileSettings");
 const { signUploadParams, uploadImage } = cloudinaryConfig;
 const {
   detectImageType,
   getPublicBrand,
+  getPublicCloudinaryLogoUrl,
+  getPublicStorefrontSettings,
+  updateProfile,
   validateProfileInput,
 } = require("../controllers/profileSettingsController");
 
@@ -16,6 +21,10 @@ function createResponse() {
     body: undefined,
     status(code) {
       this.statusCode = code;
+      return this;
+    },
+    set(name, value) {
+      this.headers = { ...this.headers, [name]: value };
       return this;
     },
     json(body) {
@@ -35,6 +44,11 @@ test("company profile uses one stable singleton id and stores logo metadata", ()
   assert.equal(profile.logo.url, "https://cdn.example/logo.png");
   assert.equal(profile.logo.publicId, "company/logo");
   assert.equal(profile.city, "");
+  assert.deepEqual(profile.publicContacts.toObject(), {
+    email: false,
+    phone: false,
+    address: false,
+  });
 });
 
 test("company profile updates only accept bounded known fields and valid public values", () => {
@@ -64,6 +78,24 @@ test("company profile updates only accept bounded known fields and valid public 
   assert.match(
     validateProfileInput({ publicId: "attacker-controlled" }).error,
     /Unsupported profile field/,
+  );
+  assert.deepEqual(
+    validateProfileInput({
+      publicContacts: { email: true, phone: false, address: true },
+    }),
+    {
+      update: {
+        publicContacts: { email: true, phone: false, address: true },
+      },
+    },
+  );
+  assert.match(
+    validateProfileInput({ publicContacts: { email: "true" } }).error,
+    /true or false/,
+  );
+  assert.match(
+    validateProfileInput({ publicContacts: { tin: true } }).error,
+    /Unsupported public contact field/,
   );
 });
 
@@ -186,6 +218,146 @@ test("public branding exposes only a display name and logo URL", async () => {
     assert.equal(Object.hasOwn(response.body, "tin"), false);
   } finally {
     ProfileSettings.findById = originalFindById;
+  }
+});
+
+test("public storefront settings expose only opted-in contact fields and a validated logo", async () => {
+  const originalFindById = ProfileSettings.findById;
+  ProfileSettings.findById = () => ({
+    lean: async () => ({
+      legalName: "Example Ltd",
+      tradingName: "Example",
+      email: "office@example.com",
+      phone: "+256 700 000 000",
+      addressLine1: "1 Bakery Road",
+      addressLine2: "Suite 2",
+      city: "Kampala",
+      region: "Central",
+      postalCode: "12345",
+      country: "Uganda",
+      website: "https://private.example.com",
+      tin: "private-tin",
+      registrationNumber: "private-registration",
+      logo: {
+        url: "https://res.cloudinary.com/example/image/upload/logo.webp",
+        publicId: "company/logo",
+      },
+      publicContacts: { email: true, phone: false, address: true },
+    }),
+  });
+  try {
+    const response = createResponse();
+    await getPublicStorefrontSettings({}, response);
+    assert.deepEqual(response.body, {
+      companyName: "Example",
+      logoUrl: "https://res.cloudinary.com/example/image/upload/logo.webp",
+      contacts: {
+        email: "office@example.com",
+        phone: "",
+        address: "1 Bakery Road, Suite 2, Kampala, Central, 12345, Uganda",
+      },
+    });
+    assert.equal(
+      response.headers["Cache-Control"],
+      "public, max-age=0, s-maxage=60, must-revalidate",
+    );
+    assert.equal(Object.hasOwn(response.body, "tin"), false);
+    assert.equal(Object.hasOwn(response.body, "website"), false);
+    assert.equal(Object.hasOwn(response.body, "publicId"), false);
+  } finally {
+    ProfileSettings.findById = originalFindById;
+  }
+});
+
+test("public storefront settings hide all contacts until explicitly opted in", async () => {
+  const originalFindById = ProfileSettings.findById;
+  ProfileSettings.findById = () => ({
+    lean: async () => ({
+      legalName: "Example Ltd",
+      email: "office@example.com",
+      phone: "+256 700 000 000",
+      addressLine1: "1 Bakery Road",
+      logo: {
+        url: "https://res.cloudinary.com.attacker.example/example/image/upload/logo.webp",
+        publicId: "company/logo",
+      },
+    }),
+  });
+  try {
+    const response = createResponse();
+    await getPublicStorefrontSettings({}, response);
+    assert.deepEqual(response.body, {
+      companyName: "Example Ltd",
+      logoUrl: "",
+      contacts: { email: "", phone: "", address: "" },
+    });
+  } finally {
+    ProfileSettings.findById = originalFindById;
+  }
+});
+
+test("public Cloudinary logos require a secure image delivery URL", () => {
+  assert.equal(
+    getPublicCloudinaryLogoUrl(
+      "https://res.cloudinary.com/example/image/upload/logo.webp",
+    ),
+    "https://res.cloudinary.com/example/image/upload/logo.webp",
+  );
+  assert.equal(
+    getPublicCloudinaryLogoUrl(
+      "http://res.cloudinary.com/example/image/upload/logo.webp",
+    ),
+    "",
+  );
+  assert.equal(
+    getPublicCloudinaryLogoUrl(
+      "https://res.cloudinary.com/example/raw/upload/logo.webp",
+    ),
+    "",
+  );
+});
+
+test("company profile publication updates write only the selected nested flags", async () => {
+  const originalFindById = ProfileSettings.findById;
+  const originalFindByIdAndUpdate = ProfileSettings.findByIdAndUpdate;
+  const originalRecordAudit = audit.recordAudit;
+  const originalStartSession = mongoose.startSession;
+  let update;
+  ProfileSettings.findById = () => ({
+    lean: async () => ({ legalName: "Example Ltd" }),
+  });
+  ProfileSettings.findByIdAndUpdate = async (_id, value) => {
+    update = value;
+    return {
+      toObject: () => ({
+        legalName: "Example Ltd",
+        publicContacts: { email: true, phone: false, address: false },
+      }),
+    };
+  };
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  audit.recordAudit = async () => {};
+  try {
+    const response = createResponse();
+    await updateProfile(
+      { body: { publicContacts: { email: true } } },
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(update.$set, { "publicContacts.email": true });
+    assert.deepEqual(response.body.profile.publicContacts, {
+      email: true,
+      phone: false,
+      address: false,
+    });
+  } finally {
+    ProfileSettings.findById = originalFindById;
+    ProfileSettings.findByIdAndUpdate = originalFindByIdAndUpdate;
+    audit.recordAudit = originalRecordAudit;
+    mongoose.startSession = originalStartSession;
   }
 });
 

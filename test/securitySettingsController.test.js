@@ -3,7 +3,10 @@ const { test } = require("node:test");
 const mongoose = require("mongoose");
 const SecuritySettings = require("../models/securitySettings");
 const audit = require("../lib/audit");
-const { updateSettings } = require("../controllers/securitySettingsController");
+const {
+  updateLoginProtection,
+  updateSettings,
+} = require("../controllers/securitySettingsController");
 
 function createResponse() {
   return {
@@ -91,4 +94,96 @@ test("session policy update and its audit event share a transaction", async (t) 
   assert.equal(recorded.eventType, "security.session_policy_updated");
   assert.equal(recorded.transaction, transaction);
   assert.deepEqual(recorded.details, { privilegedIdle: 10, generalIdle: 45, warningPeriod: 3 });
+});
+
+test("login protection settings require the complete policy shape", async () => {
+  const response = createResponse();
+  await updateLoginProtection({ body: { lockoutEnabled: true } }, response);
+
+  assert.equal(response.statusCode, 400);
+  assert.match(response.body.error, /maxAttempts/);
+});
+
+test("login protection settings reject invalid ranges and non-boolean toggles", async () => {
+  const invalidAttemptCount = createResponse();
+  await updateLoginProtection({
+    body: {
+      lockoutEnabled: true,
+      maxAttempts: 2,
+      attemptWindow: 15,
+      lockDuration: 15,
+      maxLockoutsBeforeManual: 5,
+      escalationWindowHours: 24,
+      notifyLockouts: true,
+    },
+  }, invalidAttemptCount);
+  assert.equal(invalidAttemptCount.statusCode, 400);
+  assert.match(invalidAttemptCount.body.error, /maxAttempts/);
+
+  const invalidToggle = createResponse();
+  await updateLoginProtection({
+    body: {
+      lockoutEnabled: true,
+      maxAttempts: 5,
+      attemptWindow: 15,
+      lockDuration: 15,
+      maxLockoutsBeforeManual: 5,
+      escalationWindowHours: 24,
+      notifyLockouts: "true",
+    },
+  }, invalidToggle);
+  assert.equal(invalidToggle.statusCode, 400);
+  assert.match(invalidToggle.body.error, /notifyLockouts/);
+});
+
+test("login protection policy and its audit event share a transaction", async (t) => {
+  const originals = {
+    startSession: mongoose.startSession,
+    update: SecuritySettings.findByIdAndUpdate,
+    recordAudit: audit.recordAudit,
+  };
+  const transaction = {
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  };
+  const settings = {
+    lockoutEnabled: true,
+    maxAttempts: 6,
+    attemptWindow: 20,
+    lockDuration: 30,
+    maxLockoutsBeforeManual: 4,
+    escalationWindowHours: 48,
+    notifyLockouts: false,
+  };
+  let recorded;
+  mongoose.startSession = async () => transaction;
+  SecuritySettings.findByIdAndUpdate = async (_id, _update, options) => {
+    assert.equal(options.session, transaction);
+    return {
+      ...settings,
+      toObject() {
+        return settings;
+      },
+    };
+  };
+  audit.recordAudit = async (event) => {
+    recorded = event;
+  };
+  t.after(() => {
+    mongoose.startSession = originals.startSession;
+    SecuritySettings.findByIdAndUpdate = originals.update;
+    audit.recordAudit = originals.recordAudit;
+  });
+
+  const response = createResponse();
+  await updateLoginProtection(
+    { body: settings, authUser: { _id: "super-admin", roles: ["Super Admin"] } },
+    response,
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body.loginProtection, settings);
+  assert.equal(recorded.eventType, "security.login_policy_updated");
+  assert.equal(recorded.transaction, transaction);
+  assert.deepEqual(recorded.details, settings);
 });

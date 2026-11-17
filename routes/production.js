@@ -10,6 +10,12 @@ const readRoles = ["Admin", "General Manager", "Production Manager", "Inventory 
 const productionWriteRoles = ["Production Manager", "Inventory Manager"];
 const inventoryWriteRoles = ["Inventory Manager"];
 
+function markLegacyBeverageEndpoint(_request, response, next) {
+  response.set("X-Legacy-Workflow", "beverage");
+  response.set("X-Recommended-Workflow", "/api/production/bakery");
+  next();
+}
+
 function requireRoles(allowedRoles) {
   return async (request, response, next) => {
     if (hasAnyDepartmentRole(request.authUser, allowedRoles)) return next();
@@ -31,9 +37,9 @@ const productionWriter = [...authenticated, requireRoles(productionWriteRoles)];
 const inventoryWriter = [...authenticated, requireRoles(inventoryWriteRoles)];
 
 router.get("/products", reader, controller.listProducts);
-router.post("/products", productionWriter, controller.createProduct);
-router.patch("/products/:id", productionWriter, controller.updateProduct);
-router.put("/products/:id/recipe", productionWriter, controller.changeRecipe);
+router.post("/products", ...productionWriter, markLegacyBeverageEndpoint, controller.createProduct);
+router.patch("/products/:id", ...productionWriter, markLegacyBeverageEndpoint, controller.updateProduct);
+router.put("/products/:id/recipe", ...productionWriter, markLegacyBeverageEndpoint, controller.changeRecipe);
 
 router.get("/materials", reader, controller.listMaterials);
 router.get("/materials/lots", reader, controller.listMaterialLots);
@@ -58,12 +64,12 @@ router.post("/materials/counts/submit", inventoryWriter, controller.submitRawMat
 
 router.get("/stock/balances", reader, controller.listStockBalances);
 router.get("/stock/finished/movements", reader, controller.listFinishedMovements);
-router.post("/stock/finished/receipts", inventoryWriter, controller.receiveFinishedStock);
-router.post("/stock/finished/adjustments", inventoryWriter, controller.adjustFinishedStock);
+router.post("/stock/finished/receipts", ...inventoryWriter, markLegacyBeverageEndpoint, controller.receiveFinishedStock);
+router.post("/stock/finished/adjustments", ...inventoryWriter, markLegacyBeverageEndpoint, controller.adjustFinishedStock);
 
 router.get("/runs", reader, controller.listProductionRuns);
 router.get("/runs/daily-stock-summary", reader, controller.getDailyProductionStockSummary);
-router.post("/runs", productionWriter, controller.createProductionRun);
+router.post("/runs", ...productionWriter, markLegacyBeverageEndpoint, controller.createProductionRun);
 
 router.get("/bakery/families", reader, bakeryController.listFamilies);
 router.post("/bakery/families", productionWriter, bakeryController.createFamily);
@@ -71,11 +77,15 @@ router.patch("/bakery/families/:id", productionWriter, bakeryController.updateFa
 router.post("/bakery/families/:id/images/cleanup", productionWriter, bakeryController.retryFamilyImageCleanup);
 router.delete("/bakery/families/:id/images/unattached", productionWriter, bakeryController.deleteUnattachedFamilyImage);
 router.post("/bakery/families/:id/variants", productionWriter, bakeryController.addVariant);
+router.patch("/bakery/variants/:id", productionWriter, bakeryController.updateVariant);
 router.put("/bakery/families/:id/recipe", productionWriter, bakeryController.saveRecipe);
 router.get("/bakery/batches", reader, bakeryController.listBatches);
 router.post("/bakery/batches", productionWriter, bakeryController.createBatch);
 router.post("/bakery/batches/:id/complete", productionWriter, bakeryController.completeBatch);
 router.get("/bakery/lots", reader, bakeryController.listLots);
+router.get("/bakery/lots/movements", reader, bakeryController.listLotMovements);
+router.post("/bakery/lots/receipts", inventoryWriter, bakeryController.receiveLot);
+router.post("/bakery/lots/:id/adjustments", inventoryWriter, bakeryController.adjustLot);
 router.post("/bakery/lots/:id/write-off", productionWriter, bakeryController.writeOffLot);
 
 router.requireProductionReader = requireRoles(readRoles);

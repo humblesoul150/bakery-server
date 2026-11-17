@@ -13,6 +13,7 @@ const publicImageSchema = new mongoose.Schema(
 const storefrontSchema = new mongoose.Schema(
   {
     published: { type: Boolean, default: false },
+    firstPublishedAt: { type: Date, default: null },
     slug: { type: String, trim: true, lowercase: true, maxlength: 120 },
     description: { type: String, trim: true, maxlength: 2000, default: "" },
     images: { type: [publicImageSchema], default: [] },
@@ -25,6 +26,7 @@ const storefrontSchema = new mongoose.Schema(
 const bakeryProductFamilySchema = new mongoose.Schema(
   {
     code: { type: String, required: true, trim: true, uppercase: true, maxlength: 40 },
+    seedKey: { type: String, trim: true, maxlength: 120, default: undefined },
     name: { type: String, required: true, trim: true, maxlength: 160 },
     category: { type: String, required: true, trim: true, maxlength: 80 },
     flavour: { type: String, trim: true, maxlength: 80, default: "" },
@@ -52,6 +54,7 @@ const bakeryProductFamilySchema = new mongoose.Schema(
 );
 
 bakeryProductFamilySchema.index({ code: 1 }, { unique: true });
+bakeryProductFamilySchema.index({ seedKey: 1 }, { unique: true, sparse: true });
 bakeryProductFamilySchema.index({ "storefront.slug": 1 }, { unique: true, sparse: true });
 bakeryProductFamilySchema.index({ category: 1, active: 1, name: 1 });
 

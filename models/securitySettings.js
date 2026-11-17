@@ -56,6 +56,8 @@ const securitySettingsSchema = new mongoose.Schema(
     maxAttempts: { type: Number, min: 3, max: 20, default: 5 },
     attemptWindow: { type: Number, min: 1, max: 120, default: 15 },
     lockDuration: { type: Number, min: 1, max: 1440, default: 15 },
+    maxLockoutsBeforeManual: { type: Number, min: 2, max: 10, default: 5 },
+    escalationWindowHours: { type: Number, min: 1, max: 168, default: 24 },
     privilegedIdle: { type: Number, min: 5, max: 240, default: 15 },
     generalIdle: { type: Number, min: 5, max: 480, default: 30 },
     warningPeriod: { type: Number, min: 1, max: 10, default: 2 },

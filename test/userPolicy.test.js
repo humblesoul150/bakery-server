@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const User = require("../models/user");
-const { toPublicUser } = require("../lib/userDto");
+const { toAccountManagementUser, toPublicUser } = require("../lib/userDto");
 const {
   normalizeEmail,
   validateCredentials,
@@ -150,4 +150,26 @@ test("public account response omits credential fields and maps Mongo timestamps"
   assert.equal(response.mustChangePassword, true);
   assert.equal("password" in response, false);
   assert.equal("sessionVersion" in response, false);
+});
+
+test("lockout state is confined to the authorized account-management projection", () => {
+  const user = {
+    _id: "locked-user",
+    name: "Locked User",
+    email: "locked@example.com",
+    roles: ["Sales Manager"],
+    status: "Active",
+    mustChangePassword: false,
+    manualUnlockRequiredAt: new Date("2026-01-01T10:00:00.000Z"),
+    failedLoginAttempts: 4,
+  };
+
+  assert.equal("lockout" in toPublicUser(user), false);
+  assert.deepEqual(toAccountManagementUser(user, true).lockout, {
+    state: "manual_unlock_required",
+    manualUnlockRequiredAt: "2026-01-01T10:00:00.000Z",
+    canUnlock: true,
+  });
+  assert.equal(toAccountManagementUser(user, false).lockout.canUnlock, false);
+  assert.equal("failedLoginAttempts" in toAccountManagementUser(user, true), false);
 });

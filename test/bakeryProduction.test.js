@@ -9,8 +9,13 @@ const {
   validateCompletion,
   validateFamily,
   validateRecipe,
+  validateManualLotReceipt,
+  validateLotAdjustment,
+  validateVariantUpdate,
   validateStorefront,
   isBakeryProductImagePublicId,
+  familyPublicationFieldError,
+  firstPublishedAtValue,
 } = require("../controllers/bakeryProductionController");
 
 const familyId = "507f1f77bcf86cd799439011";
@@ -81,6 +86,21 @@ test("bakery storefront image validation preserves legacy URLs and accepts owned
   assert.equal(isBakeryProductImagePublicId(publicId, familyId), true);
   assert.equal(isBakeryProductImagePublicId(publicId, materialId), false);
 
+  const folderQualifiedPublicId = `anli/bakery/products/${publicId}`;
+  const folderQualifiedImage = validateStorefront({
+    images: [{
+      url: "https://res.cloudinary.com/demo/image/upload/v1/anli/bakery/products/product.webp",
+      publicId: folderQualifiedPublicId,
+    }],
+  });
+  assert.equal(folderQualifiedImage.error, undefined);
+  assert.equal(folderQualifiedImage.value.images[0].publicId, folderQualifiedPublicId);
+  assert.equal(isBakeryProductImagePublicId(folderQualifiedPublicId, familyId), true);
+  assert.equal(isBakeryProductImagePublicId(folderQualifiedPublicId, materialId), false);
+  assert.equal(isBakeryProductImagePublicId(`anli/other/${publicId}`, familyId), false);
+  assert.equal(isBakeryProductImagePublicId(`ANLI/BAKERY/PRODUCTS/${publicId}`, familyId), false);
+  assert.equal(isBakeryProductImagePublicId(`anli/bakery/products/family-${materialId}-image-123`, familyId), false);
+
   assert.match(validateStorefront({
     images: [{
       url: "http://res.cloudinary.com/demo/image/upload/product.webp",
@@ -96,10 +116,54 @@ test("bakery storefront image validation preserves legacy URLs and accepts owned
   assert.match(validateStorefront({
     images: [{
       url: "https://res.cloudinary.com/demo/image/upload/product.webp",
+      publicId: `anli/other/${publicId}`,
+    }],
+  }).error, /family-scoped image ID/);
+  assert.match(validateStorefront({
+    images: [{
+      url: "https://res.cloudinary.com/demo/image/upload/product.webp",
       publicId,
       unexpected: "not accepted",
     }],
   }).error, /valid URL/);
+});
+
+test("publishing requires active storefront details but permits image-free products", () => {
+  const family = { active: true };
+  const storefront = {
+    slug: "classic-sourdough",
+    description: "Naturally leavened sourdough loaf.",
+    images: [{ url: "https://images.example.com/sourdough.webp", sortOrder: 0 }],
+  };
+  assert.equal(familyPublicationFieldError(family, storefront), "");
+  assert.match(familyPublicationFieldError({ active: false }, storefront), /Activate/);
+  assert.match(familyPublicationFieldError(family, { ...storefront, slug: "" }), /slug/);
+  assert.match(familyPublicationFieldError(family, { ...storefront, description: "  " }), /description/);
+  assert.equal(familyPublicationFieldError(family, { ...storefront, images: [] }), "");
+  assert.match(familyPublicationFieldError(family, {
+    ...storefront,
+    images: [{ url: "http://images.example.com/sourdough.webp", sortOrder: 0 }],
+  }), /HTTPS/);
+});
+
+test("first publication timestamp is retained across unpublish and republish", () => {
+  const firstPublishedAt = new Date("2026-11-02T10:00:00.000Z");
+  assert.equal(firstPublishedAtValue({
+    wasPublished: false,
+    firstPublishedAt: null,
+    now: new Date("2026-11-03T10:00:00.000Z"),
+  }).toISOString(), "2026-11-03T10:00:00.000Z");
+  assert.equal(firstPublishedAtValue({
+    wasPublished: false,
+    firstPublishedAt,
+    now: new Date("2026-11-05T10:00:00.000Z"),
+  }), firstPublishedAt);
+  assert.equal(firstPublishedAtValue({
+    wasPublished: true,
+    firstPublishedAt: null,
+    createdAt: new Date("2026-10-28T10:00:00.000Z"),
+    now: new Date("2026-11-05T10:00:00.000Z"),
+  }).toISOString(), "2026-10-28T10:00:00.000Z");
 });
 
 test("bakery recipe, batch, and completion validators require their core fields", () => {
@@ -123,6 +187,59 @@ test("bakery recipe, batch, and completion validators require their core fields"
   }).error, /supported by this bakery production request/);
 });
 
+test("manual bakery stock receipts and lot adjustments require traceable, idempotent details", () => {
+  const receipt = validateManualLotReceipt({
+    familyId,
+    variantId,
+    quantity: 12,
+    productionDate: "2026-01-10",
+    receiptDate: "2026-02-01",
+    expiryDate: "2099-01-12",
+    location: "Main Warehouse",
+    reference: "RECEIPT-001",
+    reason: "Supplier return accepted",
+    idempotencyKey: "receipt-001",
+  });
+  assert.equal(receipt.error, undefined);
+  assert.equal(receipt.value.quantity, 12);
+  assert.equal(validateManualLotReceipt({
+    familyId,
+    variantId,
+    quantity: 1.5,
+    productionDate: "2026-01-10",
+    receiptDate: "2026-02-01",
+    expiryDate: "2099-01-12",
+    location: "Main Warehouse",
+    reference: "RECEIPT-001",
+    reason: "Supplier return accepted",
+    idempotencyKey: "receipt-001",
+  }).error, "Provide a valid family, variant, quantity, dates, location, reference, reason, and idempotency key.");
+  assert.equal(validateLotAdjustment({
+    direction: "out",
+    quantity: 2,
+    date: "2024-01-11",
+    reason: "Count correction",
+    idempotencyKey: "adjustment-001",
+  }).error, undefined);
+  assert.match(validateLotAdjustment({
+    direction: "sideways",
+    quantity: 2,
+    date: "2024-01-11",
+    reason: "Count correction",
+    idempotencyKey: "adjustment-001",
+  }).error, /in\/out direction/);
+});
+
+test("sellable variant updates allow price and status changes without permitting SKU rewrites", () => {
+  assert.deepEqual(validateVariantUpdate({ name: "Family loaf", price: 6000, active: false }).value, {
+    name: "Family loaf",
+    price: 6000,
+    active: false,
+  });
+  assert.match(validateVariantUpdate({ sku: "RENAMED-SKU" }).error, /supported by this bakery production request/);
+  assert.match(validateVariantUpdate({ price: 1.5 }).error, /positive whole UGX/);
+});
+
 test("fractional shelf-life days round upward to avoid expiring product too early", () => {
   assert.equal(addShelfLifeDays("2026-03-10", 0.25), "2026-03-11");
   assert.equal(addShelfLifeDays("2026-03-10", 2), "2026-03-12");
@@ -134,10 +251,14 @@ test("bakery production endpoints use the existing production role policies and 
     "/bakery/families",
     "/bakery/families/:id",
     "/bakery/families/:id/variants",
+    "/bakery/variants/:id",
     "/bakery/families/:id/recipe",
     "/bakery/batches",
     "/bakery/batches/:id/complete",
     "/bakery/lots",
+    "/bakery/lots/movements",
+    "/bakery/lots/receipts",
+    "/bakery/lots/:id/adjustments",
     "/bakery/lots/:id/write-off",
   ]) {
     assert.ok(paths.includes(path), `Missing route ${path}`);
@@ -149,8 +270,27 @@ test("bakery production endpoints use the existing production role policies and 
     "production.bakery_recipe_updated",
     "production.bakery_batch_created",
     "production.bakery_batch_completed",
+    "production.bakery_lot_received",
+    "production.bakery_lot_adjusted",
+    "production.bakery_variant_updated",
   ]) {
     assert.ok(AUDIT_EVENT_TYPES.includes(eventType), `Missing audit type ${eventType}`);
+  }
+});
+
+test("legacy beverage write routes identify the bakery replacement without removing compatibility", () => {
+  const legacyWrites = [
+    ["/products", "post"],
+    ["/products/:id", "patch"],
+    ["/products/:id/recipe", "put"],
+    ["/runs", "post"],
+    ["/stock/finished/receipts", "post"],
+    ["/stock/finished/adjustments", "post"],
+  ];
+  for (const [path, method] of legacyWrites) {
+    const route = routes.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]);
+    assert.ok(route, `Missing legacy compatibility route ${method.toUpperCase()} ${path}`);
+    assert.ok(route.route.stack.some((layer) => layer.handle.name === "markLegacyBeverageEndpoint"), `Missing legacy response marker on ${path}`);
   }
 });
 

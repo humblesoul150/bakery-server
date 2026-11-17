@@ -12,6 +12,7 @@ const {
 } = require("../middleware/authentication");
 const { getSecuritySettings } = require("../lib/securitySettings");
 const audit = require("../lib/audit");
+const { recordFailedSignIn } = require("../lib/accountLockout");
 const { sessionDetails } = require("../lib/sessionPolicy");
 const {
   createSession,
@@ -57,29 +58,46 @@ async function login(request, response) {
   }
 
   if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
-    await audit.recordAudit({
-      request,
-      eventType: "auth.login.failed",
-      outcome: "failure",
-      reason: "invalid_credentials",
-    });
+    const user = await User.findOne({ email }).select("_id status");
+    if (user?.status === "Active") {
+      const settings = await getSecuritySettings();
+      await recordFailedSignIn({
+        request,
+        userId: user._id,
+        settings,
+      });
+    } else {
+      await audit.recordAudit({
+        request,
+        eventType: "auth.login.failed",
+        outcome: "failure",
+        reason: "invalid_credentials",
+        target: user,
+      });
+    }
     return response
       .status(401)
       .json({ error: "The email or password is incorrect." });
   }
 
-  const user = await User.findOne({ email }).select("+password");
-  if (
-    !user ||
-    !(await user.comparePassword(password))
-  ) {
-    await audit.recordAudit({
-      request,
-      eventType: "auth.login.failed",
-      outcome: "failure",
-      reason: "invalid_credentials",
-      target: user,
-    });
+  let user = await User.findOne({ email }).select("+password");
+  if (!user || !(await user.comparePassword(password))) {
+    if (user?.status === "Active") {
+      const settings = await getSecuritySettings();
+      await recordFailedSignIn({
+        request,
+        userId: user._id,
+        settings,
+      });
+    } else {
+      await audit.recordAudit({
+        request,
+        eventType: "auth.login.failed",
+        outcome: "failure",
+        reason: "invalid_credentials",
+        target: user,
+      });
+    }
     return response
       .status(401)
       .json({ error: "The email or password is incorrect." });
@@ -127,8 +145,63 @@ async function login(request, response) {
     });
   }
 
-  user.lastActive = new Date();
-  await user.save();
+  const now = new Date();
+  const authenticatedUserId = user._id;
+  const passwordHash = user.password;
+  user = await User.findOneAndUpdate(
+    {
+      _id: authenticatedUserId,
+      password: passwordHash,
+      status: "Active",
+      manualUnlockRequiredAt: { $in: [null] },
+      $or: [
+        { lockedUntil: { $exists: false } },
+        { lockedUntil: null },
+        { lockedUntil: { $lte: now } },
+      ],
+    },
+    {
+      $set: { lastActive: now, failedLoginHistory: [] },
+      $unset: { lockedUntil: 1 },
+    },
+    { new: true },
+  );
+  if (!user) {
+    const currentUser = await User.findById(authenticatedUserId).select("+password");
+    if (!currentUser || !(await currentUser.comparePassword(password))) {
+      return response.status(401).json({ error: "The email or password is incorrect." });
+    }
+    if (currentUser?.status === "Suspended") {
+      await audit.recordAudit({
+        request,
+        eventType: "auth.login.rejected_suspended",
+        outcome: "denied",
+        reason: "account_suspended",
+        target: currentUser,
+      });
+      return response.status(403).json({
+        error: "Your account has been suspended. Please contact an administrator for more information.",
+        code: "ACCOUNT_SUSPENDED",
+      });
+    }
+    if (currentUser?.manualUnlockRequiredAt || currentUser?.lockedUntil > now) {
+      const manual = Boolean(currentUser.manualUnlockRequiredAt);
+      await audit.recordAudit({
+        request,
+        eventType: "auth.login.rejected_locked",
+        outcome: "denied",
+        reason: manual ? "manual_unlock_required" : "temporary_lock_active",
+        target: currentUser,
+      });
+      return response.status(423).json({
+        error: manual
+          ? "Your account is locked. Contact the responsible account manager to unlock it."
+          : `Your account is temporarily locked until ${currentUser.lockedUntil.toISOString()}.`,
+        code: "ACCOUNT_LOCKED",
+      });
+    }
+    return response.status(401).json({ error: "The email or password is incorrect." });
+  }
   const session = await createSession(user, request, response);
   try {
     await audit.recordAudit({
