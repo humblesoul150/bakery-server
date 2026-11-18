@@ -20,7 +20,6 @@ const payrollRoutes = require("./routes/payroll");
 const expenseRoutes = require("./routes/expenses");
 const customerRoutes = require("./routes/customers");
 const salesRoutes = require("./routes/sales");
-const salesBonusSettingsRoutes = require("./routes/salesBonusSettings");
 const receiptRoutes = require("./routes/receipts");
 const orderRoutes = require("./routes/orders");
 const notificationRoutes = require("./routes/notifications");
@@ -28,6 +27,8 @@ const approvalRoutes = require("./routes/approvals");
 const dashboardRoutes = require("./routes/dashboard");
 const uploadRoutes = require("./routes/uploads");
 const storefrontRoutes = require("./routes/storefront");
+const websiteCommunicationsRoutes = require("./routes/websiteCommunications");
+const resendWebhookRoutes = require("./routes/resendWebhook");
 const { adminReadOnly } = require("./middleware/adminReadOnly");
 
 function createApp(config) {
@@ -47,13 +48,20 @@ function createApp(config) {
       },
       credentials: true,
       methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "X-Bootstrap-Secret"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Bootstrap-Secret", "Idempotency-Key"],
     }),
   );
   app.use(helmet());
   // app.use(cors());
   app.use(compression());
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({
+    limit: "1mb",
+    verify(request, _response, buffer) {
+      if (request.originalUrl.split("?")[0] === "/api/webhooks/resend") {
+        request.rawBody = Buffer.from(buffer);
+      }
+    },
+  }));
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
   app.use("/api", adminReadOnly);
 
@@ -91,13 +99,14 @@ function createApp(config) {
   app.use("/api/expenses", expenseRoutes);
   app.use("/api/customers", customerRoutes);
   app.use("/api/sales", salesRoutes);
-  app.use("/api/sales-bonus-settings", salesBonusSettingsRoutes);
   app.use("/api/receipts", receiptRoutes);
   app.use("/api/orders", orderRoutes);
   app.use("/api/notifications", notificationRoutes);
   app.use("/api/approvals", approvalRoutes);
   app.use("/api/dashboard", dashboardRoutes);
   app.use("/api/uploads", uploadRoutes);
+  app.use("/api/webhooks/resend", resendWebhookRoutes);
+  app.use("/api/website-communications", websiteCommunicationsRoutes);
   app.use("/api/storefront", storefrontRoutes);
 
   app.use((error, _request, response, _next) => {

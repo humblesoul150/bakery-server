@@ -53,6 +53,10 @@ function positive(value) {
   return Number.isFinite(value) && value > 0;
 }
 
+function isActiveRecipeIngredient(material) {
+  return Boolean(material && material.active && material.category === "Ingredients");
+}
+
 function validateObject(body, fields) {
   if (!isRecord(body) || Object.keys(body).some((key) => !fields.includes(key))) {
     return { error: "Provide only fields supported by this bakery production request." };
@@ -893,7 +897,9 @@ async function saveRecipe(request, response) {
       const ingredients = [];
       for (const item of value.ingredients) {
         const material = await RawMaterial.findOne({ _id: item.materialId, active: true }).session(session);
-        if (!material) throw conflict("A selected raw material is missing or inactive.");
+        if (!isActiveRecipeIngredient(material)) {
+          throw conflict("Each recipe ingredient must be an active raw material in the Ingredients category.");
+        }
         ingredients.push({
           materialId: material._id,
           materialName: material.name,
@@ -1021,8 +1027,8 @@ async function completeBatch(request, response) {
       }
       for (const line of batch.ingredients) {
         const material = await RawMaterial.findOne({ _id: line.materialId, active: true }).session(session);
-        if (!material || material.unit !== line.unit) {
-          throw conflict(`The ingredient ${line.materialName} is missing, inactive, or has changed base units.`);
+        if (!isActiveRecipeIngredient(material) || material.unit !== line.unit) {
+          throw conflict(`The ingredient ${line.materialName} is missing, inactive, no longer in the Ingredients category, or has changed base units.`);
         }
         const actualQuantity = actualById.get(String(line.materialId));
         if (actualQuantity > 0) {
@@ -1557,4 +1563,5 @@ module.exports = {
   validateVariantUpdate,
   validateVariants,
   isBakeryProductImagePublicId,
+  isActiveRecipeIngredient,
 };

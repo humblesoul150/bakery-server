@@ -8,20 +8,18 @@ const salesRouter = require("../routes/sales");
 const salesController = require("../controllers/salesController");
 const audit = require("../lib/audit");
 const {
-  validateLegacyPaymentInput,
-  validateLegacySaleInput,
   validatePaymentInput,
   validateSaleInput,
   validateSaleTotals,
 } = require("../controllers/salesController");
 
-const productId = "507f1f77bcf86cd799439013";
+const variantId = "507f1f77bcf86cd799439013";
 const userId = "507f1f77bcf86cd799439011";
 
 function saleInput(overrides = {}) {
   return {
     customerId: "C-100",
-    lines: [{ productId, packs: 2 }],
+    lines: [{ variantId, packs: 2 }],
     paymentTerms: "Credit",
     dueDate: "2026-11-01",
     idempotencyKey: "sale-1",
@@ -34,13 +32,13 @@ test("sales validation accepts catalog-priced pack lines and rejects invalid inp
   assert.equal(valid.error, undefined);
   assert.equal(valid.value.lines[0].packs, 2);
   assert.equal(validateSaleInput(saleInput({
-    lines: [{ productId, packs: 1, pricePerPack: 23000, overrideReason: "Approved wholesale rate" }],
+    lines: [{ variantId, packs: 1, pricePerPack: 23000, overrideReason: "Approved wholesale rate" }],
   })).error, undefined);
-  assert.match(validateSaleInput(saleInput({ lines: [{ productId, packs: 1.5 }] })).error, /positive whole number/);
-  assert.match(validateSaleInput(saleInput({ lines: [{ productId, packs: 1, pricePerPack: 0, overrideReason: "Discount" }] })).error, /positive whole number/);
-  assert.match(validateSaleInput(saleInput({ lines: [{ productId, packs: 1, pricePerPack: 23000 }] })).error, /reason is required/);
-  assert.match(validateSaleInput(saleInput({ lines: [{ productId, packs: 1, overrideReason: "No override" }] })).error, /only be supplied/);
-  assert.match(validateSaleInput(saleInput({ lines: [{ productId, packs: 1, extra: "rejected" }] })).error, /Each sale line/);
+  assert.match(validateSaleInput(saleInput({ lines: [{ variantId, packs: 1.5 }] })).error, /positive whole number/);
+  assert.match(validateSaleInput(saleInput({ lines: [{ variantId, packs: 1, pricePerPack: 0, overrideReason: "Discount" }] })).error, /positive whole number/);
+  assert.match(validateSaleInput(saleInput({ lines: [{ variantId, packs: 1, pricePerPack: 23000 }] })).error, /reason is required/);
+  assert.match(validateSaleInput(saleInput({ lines: [{ variantId, packs: 1, overrideReason: "No override" }] })).error, /only be supplied/);
+  assert.match(validateSaleInput(saleInput({ lines: [{ variantId, packs: 1, extra: "rejected" }] })).error, /Each sale line/);
 });
 
 test("guest sales require full payment and cannot use credit terms", () => {
@@ -130,19 +128,19 @@ test("sales schemas enforce unique receipt, annual sequence, payment and idempot
     company: {},
     date: "2026-10-23",
     lines: [{
-      productId,
-      productCode: "JU-01",
-      productName: "Mango juice",
-      packType: "Box",
-      piecesPerPack: 12,
+      variantId,
+      productCode: "SD-LOAF",
+      sku: "SD-LOAF",
+      productName: "Sourdough loaf",
+      saleUnit: "loaf",
+      unitsPerSaleUnit: 1,
       packs: 2,
-      quantityPieces: 24,
-      catalogPricePerPack: 24000,
-      pricePerPack: 23000,
-      overrideReason: "Approved discount",
-      lineTotal: 46000,
+      quantityPieces: 2,
+      catalogPricePerPack: 12000,
+      pricePerPack: 12000,
+      lineTotal: 24000,
     }],
-    total: 46000,
+    total: 24000,
     paidAmount: 0,
     paymentTerms: "Credit",
     dueDate: "2026-11-01",
@@ -150,56 +148,8 @@ test("sales schemas enforce unique receipt, annual sequence, payment and idempot
   });
   assert.equal(sale.createdByName, "");
 
-  test("legacy sales and payments validate for retryable history import", async () => {
-    const legacySale = {
-      id: "S-1048",
-      reference: "SAL-1048",
-      date: "2026-10-23",
-      customer: "Kampala Fresh Mart",
-      customerId: "C-100",
-      product: "Premium Maize Flour",
-      quantity: 42,
-      total: 1890000,
-      status: "Paid",
-      method: "Mobile Money",
-      paymentTerms: "Same-day",
-    };
-    assert.equal(validateLegacySaleInput(legacySale).error, undefined);
-    assert.match(validateLegacySaleInput({ ...legacySale, total: 1.5 }).error, /positive whole numbers/);
-    assert.match(validateLegacySaleInput({ ...legacySale, untrusted: true }).error, /unsupported fields/);
-    assert.equal(validateLegacyPaymentInput({
-      id: "PAY-1043-1",
-      saleId: "S-1043",
-      amount: 500000,
-      date: "2026-10-23",
-      method: "Bank Transfer",
-      txnID: "BNK-70421",
-    }).error, undefined);
-
-    const legacy = new Sale({
-      receiptNumber: "SAL-1048",
-      receiptYear: 2026,
-      receiptSequence: 1,
-      legacyId: "S-1048",
-      legacyImported: true,
-      legacyImportHash: "a".repeat(64),
-      legacyProduct: "Premium Maize Flour",
-      legacyQuantity: 42,
-      customer: { name: "Kampala Fresh Mart" },
-      company: {},
-      date: "2026-10-23",
-      lines: [],
-      total: 1890000,
-      paidAmount: 1890000,
-      paymentTerms: "Same-day",
-      actor: userId,
-    });
-    await legacy.validate();
-    assert.equal(legacy.legacyImported, true);
-    assert.ok(SalePayment.schema.indexes().some(([keys, options]) => keys.legacyId === 1 && options.unique));
-  });
   await sale.validate();
-  assert.equal(mongoose.isValidObjectId(sale.lines[0].productId), true);
+  assert.equal(mongoose.isValidObjectId(sale.lines[0].variantId), true);
 });
 
 test("sales route grants read/write middleware only to configured sales roles", async () => {

@@ -14,6 +14,7 @@ const {
   validateVariantUpdate,
   validateStorefront,
   isBakeryProductImagePublicId,
+  isActiveRecipeIngredient,
   familyPublicationFieldError,
   firstPublishedAtValue,
 } = require("../controllers/bakeryProductionController");
@@ -187,6 +188,13 @@ test("bakery recipe, batch, and completion validators require their core fields"
   }).error, /supported by this bakery production request/);
 });
 
+test("bakery recipe ingredients must be active materials in the Ingredients category", () => {
+  assert.equal(isActiveRecipeIngredient({ active: true, category: "Ingredients" }), true);
+  assert.equal(isActiveRecipeIngredient({ active: true, category: "Packaging" }), false);
+  assert.equal(isActiveRecipeIngredient({ active: true, category: "Cleaning supplies" }), false);
+  assert.equal(isActiveRecipeIngredient({ active: false, category: "Ingredients" }), false);
+});
+
 test("manual bakery stock receipts and lot adjustments require traceable, idempotent details", () => {
   const receipt = validateManualLotReceipt({
     familyId,
@@ -278,7 +286,7 @@ test("bakery production endpoints use the existing production role policies and 
   }
 });
 
-test("legacy beverage write routes identify the bakery replacement without removing compatibility", () => {
+test("legacy beverage routes are rejected as removed endpoints", () => {
   const legacyWrites = [
     ["/products", "post"],
     ["/products/:id", "patch"],
@@ -289,8 +297,7 @@ test("legacy beverage write routes identify the bakery replacement without remov
   ];
   for (const [path, method] of legacyWrites) {
     const route = routes.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]);
-    assert.ok(route, `Missing legacy compatibility route ${method.toUpperCase()} ${path}`);
-    assert.ok(route.route.stack.some((layer) => layer.handle.name === "markLegacyBeverageEndpoint"), `Missing legacy response marker on ${path}`);
+    assert.equal(route, undefined, `Legacy route should be removed: ${method.toUpperCase()} ${path}`);
   }
 });
 

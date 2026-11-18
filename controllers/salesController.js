@@ -4,22 +4,17 @@ const Sale = require("../models/sale");
 const SalePayment = require("../models/salePayment");
 const ReceiptSequence = require("../models/receiptSequence");
 const { allocateCreditPaymentReceiptNumber } = require("../lib/creditPaymentReceipt");
-const FinishedProduct = require("../models/finishedProduct");
 const Customer = require("../models/customer");
 const User = require("../models/user");
 const ProfileSettings = require("../models/profileSettings");
 const audit = require("../lib/audit");
-const { recordFinishedStockMovement } = require("../lib/productionInventory");
-const SalesBonusSettings = require("../models/salesBonusSettings");
-const { calculateSalesBonus, allocateBonus, normalizeSettings } = require("../lib/salesBonus");
+const BakeryProductVariant = require("../models/bakeryProductVariant");
+const BakeryProductFamily = require("../models/bakeryProductFamily");
+const { dispatchBakerySaleLots } = require("../lib/finishedStockLotSales");
 
 const PAYMENT_TERMS = ["Paid now", "Same-day", "Credit"];
 const SALE_ROLES = ["Sales Manager", "General Manager", "Super Admin"];
 const MAX_PAGE_SIZE = 200;
-const MAX_LEGACY_SALES = 200;
-const MAX_LEGACY_PAYMENTS = 1000;
-const LEGACY_SALE_FIELDS = ["id", "reference", "date", "customer", "customerId", "product", "quantity", "total", "status", "method", "txnID", "paymentTerms", "dueDate"];
-const LEGACY_PAYMENT_FIELDS = ["id", "saleId", "amount", "date", "method", "txnID", "note", "recordedAt"];
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 function validDate(value) {
@@ -49,8 +44,6 @@ function validateSaleInput(body) {
     "initialPaymentMethod",
     "initialPaymentTxnID",
     "idempotencyKey",
-    "bonusDisabled",
-    "bonusDisabledReason",
   ];
   if (!body || typeof body !== "object" || Array.isArray(body) ||
     Object.keys(body).some((key) => !allowed.includes(key))) {
@@ -67,13 +60,16 @@ function validateSaleInput(body) {
   const lines = [];
   for (const line of body.lines) {
     if (!line || typeof line !== "object" || Array.isArray(line) ||
-      Object.keys(line).some((key) => !["productId", "packs", "pricePerPack", "overrideReason"].includes(key))) {
-      return { error: "Each sale line must contain only a product, pack quantity, and optional authorized price override." };
+      Object.keys(line).some((key) => !["variantId", "packs", "pricePerPack", "overrideReason"].includes(key))) {
+      return { error: "Each sale line must contain a bakery variant, packs, and an optional authorized price override." };
     }
-    if (!validObjectId(line.productId)) return { error: "Choose a valid finished product for every sale line." };
+    if (!validObjectId(line.variantId)) return { error: "Choose a valid bakery variant for every sale line." };
     const packs = Number(line.packs);
-    if (!Number.isInteger(packs) || packs < 1) return { error: "Pack quantity must be a positive whole number." };
-    const item = { productId: String(new mongoose.Types.ObjectId(line.productId)), packs };
+    if (!Number.isInteger(packs) || packs < 1) return { error: "packs must be a positive whole number of sale units." };
+    const item = {
+      variantId: String(new mongoose.Types.ObjectId(line.variantId)),
+      packs,
+    };
     if (own(line, "pricePerPack")) {
       const pricePerPack = Number(line.pricePerPack);
       if (!Number.isInteger(pricePerPack) || pricePerPack < 1) return { error: "An overridden price must be a positive whole number of UGX per pack." };
@@ -125,21 +121,12 @@ function validateSaleInput(body) {
   if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim() || body.idempotencyKey.length > 120) {
     return { error: "A valid idempotencyKey is required." };
   }
-  const hasBonusDisable = body.bonusDisabled !== undefined || body.bonusDisabledReason !== undefined;
-  if (hasBonusDisable && typeof body.bonusDisabled !== "boolean") {
-    return { error: "bonusDisabled must be true or false." };
-  }
-  if (body.bonusDisabled && (typeof body.bonusDisabledReason !== "string" || !body.bonusDisabledReason.trim() || body.bonusDisabledReason.trim().length > 500)) {
-    return { error: "A reason of 500 characters or fewer is required to disable the sales bonus." };
-  }
-  if (!body.bonusDisabled && body.bonusDisabledReason !== undefined && body.bonusDisabledReason !== "") {
-    return { error: "A bonus disable reason can only be supplied when the bonus is disabled." };
-  }
   const linesByProduct = new Map();
   for (const line of lines) {
-    const existing = linesByProduct.get(line.productId);
+    const key = line.variantId;
+    const existing = linesByProduct.get(key);
     if (!existing) {
-      linesByProduct.set(line.productId, { ...line });
+      linesByProduct.set(key, { ...line });
       continue;
     }
     if (existing.pricePerPack !== line.pricePerPack ||
@@ -160,8 +147,6 @@ function validateSaleInput(body) {
       initialPaymentMethod: body.initialPaymentMethod,
       initialPaymentTxnID: body.initialPaymentTxnID?.trim() || "",
       idempotencyKey: body.idempotencyKey.trim(),
-      bonusDisabled: body.bonusDisabled === true,
-      bonusDisabledReason: body.bonusDisabled === true ? body.bonusDisabledReason.trim() : "",
     },
   };
 }
@@ -277,275 +262,6 @@ function companyWorkDate() {
   }).format(new Date());
 }
 
-function validateLegacySaleInput(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body) ||
-    Object.keys(body).some((key) => !LEGACY_SALE_FIELDS.includes(key))) {
-    return { error: "Legacy sale contains unsupported fields." };
-  }
-  const text = (value, max) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= max;
-  if (!text(body.id, 100) || !text(body.reference, 40) || !validDate(body.date) ||
-    !text(body.customer, 180) || !text(body.product, 160)) {
-    return { error: "Legacy sale must have an ID, receipt reference, valid date, customer, and product." };
-  }
-  if (body.customerId !== undefined &&
-    (typeof body.customerId !== "string" || !body.customerId.trim() || body.customerId.length > 80)) {
-    return { error: "Legacy customer ID is invalid." };
-  }
-  const quantity = Number(body.quantity);
-  const total = Number(body.total);
-  if (!Number.isSafeInteger(quantity) || quantity < 1 || !Number.isSafeInteger(total) || total < 1) {
-    return { error: "Legacy quantity and total must be positive whole numbers." };
-  }
-  if (!["Paid", "Pending"].includes(body.status)) return { error: "Legacy payment status is invalid." };
-  const paymentTerms = body.paymentTerms === undefined ? "Same-day" : body.paymentTerms;
-  if (!PAYMENT_TERMS.includes(paymentTerms)) return { error: "Legacy payment terms are invalid." };
-  if (body.dueDate !== undefined && body.dueDate !== "" && !validDate(body.dueDate)) {
-    return { error: "Legacy due date is invalid." };
-  }
-  if (body.method !== undefined && (typeof body.method !== "string" || body.method.length > 40)) {
-    return { error: "Legacy payment method is invalid." };
-  }
-  if (body.txnID !== undefined && (typeof body.txnID !== "string" || body.txnID.length > 120)) {
-    return { error: "Legacy transaction ID is invalid." };
-  }
-  return {
-    value: {
-      id: body.id.trim(),
-      reference: body.reference.trim(),
-      date: body.date,
-      customer: body.customer.trim(),
-      customerId: body.customerId?.trim() || null,
-      product: body.product.trim(),
-      quantity,
-      total,
-      status: body.status,
-      method: body.method?.trim() || "",
-      txnID: body.txnID?.trim() || "",
-      paymentTerms,
-      dueDate: body.dueDate || undefined,
-    },
-  };
-}
-
-function validateLegacyPaymentInput(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body) ||
-    Object.keys(body).some((key) => !LEGACY_PAYMENT_FIELDS.includes(key))) {
-    return { error: "Legacy payment contains unsupported fields." };
-  }
-  if (typeof body.id !== "string" || !body.id.trim() || body.id.length > 100 ||
-    typeof body.saleId !== "string" || !body.saleId.trim() || body.saleId.length > 100) {
-    return { error: "Legacy payment and sale IDs are required." };
-  }
-  const amount = Number(body.amount);
-  if (!Number.isSafeInteger(amount) || amount <= 0) return { error: "Legacy payment amount must be a positive whole number." };
-  const date = validDate(body.date)
-    ? body.date
-    : typeof body.recordedAt === "string" && validDate(body.recordedAt.slice(0, 10))
-      ? body.recordedAt.slice(0, 10)
-      : "";
-  if (!date) return { error: "Legacy payment date is invalid." };
-  if (!SalePayment.METHODS.includes(body.method)) return { error: "Legacy payment method is invalid." };
-  for (const field of ["txnID", "note", "recordedAt"]) {
-    if (body[field] !== undefined && (typeof body[field] !== "string" || body[field].length > 500)) {
-      return { error: `Legacy payment ${field} is invalid.` };
-    }
-  }
-  return {
-    value: {
-      id: body.id.trim(),
-      saleId: body.saleId.trim(),
-      amount,
-      date,
-      method: body.method,
-      txnID: body.txnID?.trim() || "",
-      note: body.note?.trim() || "",
-      recordedAt: body.recordedAt,
-    },
-  };
-}
-
-function paymentLegacyId(saleId, paymentId) {
-  const value = `${saleId}:${paymentId}`;
-  return value.length <= 140 ? value : `legacy-payment-${createHash("sha256").update(value).digest("hex")}`;
-}
-
-async function importLegacySales(request, response) {
-  const body = request.body;
-  if (!body || typeof body !== "object" || Array.isArray(body) ||
-    Object.keys(body).some((key) => !["sales", "payments"].includes(key))) {
-    return response.status(400).json({ error: "Provide legacy sales and payments arrays." });
-  }
-  if (!Array.isArray(body.sales) || body.sales.length > MAX_LEGACY_SALES ||
-    !Array.isArray(body.payments) || body.payments.length > MAX_LEGACY_PAYMENTS) {
-    return response.status(400).json({
-      error: `sales must contain at most ${MAX_LEGACY_SALES} records and payments at most ${MAX_LEGACY_PAYMENTS} records.`,
-    });
-  }
-  const validatedPayments = body.payments.map((payment, index) => ({
-    index,
-    raw: payment,
-    result: validateLegacyPaymentInput(payment),
-  }));
-  const paymentsBySale = new Map();
-  const rejectedPayments = [];
-  for (const payment of validatedPayments) {
-    if (payment.result.error) {
-      rejectedPayments.push({
-        id: typeof payment.raw?.id === "string" ? payment.raw.id : `payment-${payment.index + 1}`,
-        reason: payment.result.error,
-      });
-      continue;
-    }
-    const value = payment.result.value;
-    if (!paymentsBySale.has(value.saleId)) paymentsBySale.set(value.saleId, []);
-    paymentsBySale.get(value.saleId).push(value);
-  }
-
-  const imported = [];
-  const duplicates = [];
-  const rejected = [];
-  const seenIds = new Set();
-  for (const [index, rawSale] of body.sales.entries()) {
-    const validation = validateLegacySaleInput(rawSale);
-    const sourceId = typeof rawSale?.id === "string" ? rawSale.id : `sale-${index + 1}`;
-    if (validation.error) {
-      rejected.push({ id: sourceId, reason: validation.error });
-      continue;
-    }
-    const saleInput = validation.value;
-    if (seenIds.has(saleInput.id)) {
-      rejected.push({ id: saleInput.id, reason: "Duplicate legacy sale ID in this import batch." });
-      continue;
-    }
-    seenIds.add(saleInput.id);
-    const sourcePayments = paymentsBySale.get(saleInput.id) || [];
-    const paymentTotal = sourcePayments.reduce((total, payment) => total + payment.amount, 0);
-    if (!Number.isSafeInteger(paymentTotal) || paymentTotal > saleInput.total) {
-      rejected.push({ id: saleInput.id, reason: "Legacy payments exceed the sale total." });
-      continue;
-    }
-    if (saleInput.status === "Paid" && paymentTotal < saleInput.total) {
-      sourcePayments.push({
-        id: "legacy-paid-status",
-        saleId: saleInput.id,
-        amount: saleInput.total - paymentTotal,
-        date: saleInput.date,
-        method: "Legacy",
-        txnID: "",
-        note: "Imported paid status; the original payment detail was unavailable.",
-      });
-    }
-    const requestHash = createHash("sha256")
-      .update(JSON.stringify({ sale: saleInput, payments: sourcePayments }))
-      .digest("hex");
-    try {
-      const result = await mongoose.connection.transaction(async (session) => {
-        const existing = await Sale.findOne({ legacyId: saleInput.id }).session(session);
-        if (existing) {
-          if (existing.legacyImportHash !== requestHash) {
-            throw invalid("A legacy sale with this ID already exists with different data.", 409);
-          }
-          return { duplicate: true };
-        }
-        const customer = saleInput.customerId
-          ? await Customer.findOne({ id: saleInput.customerId }).session(session).lean()
-          : null;
-        const profile = await ProfileSettings.findById("global").session(session).lean();
-        const year = getSequenceYear(saleInput.date);
-        const counter = await ReceiptSequence.findOneAndUpdate(
-          { _id: year },
-          { $inc: { sequence: 1 } },
-          { new: true, upsert: true, session, setDefaultsOnInsert: true },
-        );
-        const [sale] = await Sale.create([{
-          receiptNumber: saleInput.reference,
-          receiptYear: year,
-          receiptSequence: counter.sequence,
-          legacyId: saleInput.id,
-          legacyImported: true,
-          legacyImportHash: requestHash,
-          legacyProduct: saleInput.product,
-          legacyQuantity: saleInput.quantity,
-          legacyMethod: saleInput.method,
-          legacyTxnID: saleInput.txnID,
-          customerId: saleInput.customerId,
-          customer: customer
-            ? { ...customerSnapshot(customer), name: saleInput.customer }
-            : guestSnapshot({ name: saleInput.customer }),
-          company: companySnapshot(profile),
-          date: saleInput.date,
-          lines: [],
-          total: saleInput.total,
-          paidAmount: paymentTotal + (saleInput.status === "Paid" ? saleInput.total - paymentTotal : 0),
-          paymentTerms: saleInput.paymentTerms,
-          dueDate: saleInput.dueDate,
-          actor: actorId(request),
-        }], { session });
-        const payments = [];
-        for (const payment of sourcePayments) {
-          payments.push({
-            saleId: sale._id,
-            amount: payment.amount,
-            date: payment.date,
-            method: payment.method,
-            txnID: payment.txnID,
-            note: payment.note,
-            paymentReceiptNumber: sale.paymentTerms === "Credit"
-              ? await allocateCreditPaymentReceiptNumber(payment.date, session)
-              : undefined,
-            legacyId: paymentLegacyId(saleInput.id, payment.id),
-            idempotencyKey: `legacy-payment-${createHash("sha256").update(`${saleInput.id}:${payment.id}`).digest("hex")}`,
-            actor: actorId(request),
-          });
-        }
-        if (payments.length) await SalePayment.create(payments, { session });
-        const receiptMatch = /^SAL-(\d{4})-(\d{6})$/.exec(saleInput.reference);
-        if (receiptMatch) {
-          await ReceiptSequence.updateOne(
-            { _id: Number(receiptMatch[1]) },
-            { $max: { sequence: Number(receiptMatch[2]) } },
-            { session, upsert: true, setDefaultsOnInsert: true },
-          );
-        }
-        await audit.recordAudit({
-          request,
-          eventType: "sale.legacy_imported",
-          outcome: "success",
-          details: {
-            saleId: String(sale._id),
-            legacyId: saleInput.id,
-            receiptNumber: saleInput.reference,
-            paymentCount: payments.length,
-            stockDispatchPosted: false,
-          },
-          transaction: session,
-        });
-        return { duplicate: false };
-      });
-      if (result.duplicate) duplicates.push(saleInput.id);
-      else imported.push(saleInput.id);
-    } catch (error) {
-      if (error.statusCode || error.code === 11000 || error.name === "ValidationError" || error.name === "CastError") {
-        rejected.push({ id: saleInput.id, reason: error.message });
-        continue;
-      }
-      throw error;
-    }
-  }
-  const importedIds = new Set(body.sales.filter((item) => typeof item?.id === "string").map((item) => item.id));
-  for (const [saleId, salePayments] of paymentsBySale) {
-    if (!importedIds.has(saleId)) rejectedPayments.push({ id: saleId, reason: "Payment references a sale that was not included in this import." });
-    else if (salePayments.some((payment) => !seenIds.has(payment.saleId))) {
-      rejectedPayments.push({ id: saleId, reason: "Payment belongs to a duplicate or rejected sale; retry with its sale record." });
-    }
-  }
-  return response.status(201).json({
-    imported,
-    duplicates,
-    rejected: [...rejected, ...rejectedPayments],
-  });
-}
-
 async function listSales(request, response) {
   const limitValue = Number(request.query.limit || 100);
   const limit = Number.isInteger(limitValue) ? Math.min(MAX_PAGE_SIZE, Math.max(1, limitValue)) : 100;
@@ -586,7 +302,7 @@ async function listSales(request, response) {
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const creatorIds = [...new Set(page
-    .filter((sale) => !sale.createdByName && !sale.legacyImported && sale.actor)
+    .filter((sale) => !sale.createdByName && sale.actor)
     .map((sale) => String(sale.actor)))];
   const creators = creatorIds.length
     ? await User.find({ _id: { $in: creatorIds } }).select("_id name").lean()
@@ -615,7 +331,7 @@ async function getSale(request, response) {
   if (!validObjectId(request.params.id)) return response.status(400).json({ error: "Sale ID is invalid." });
   const sale = await Sale.findOne({ _id: request.params.id, voidedAt: null }).lean();
   if (!sale) return response.status(404).json({ error: "Sale not found." });
-  const creator = !sale.createdByName && !sale.legacyImported && sale.actor
+  const creator = !sale.createdByName && sale.actor
     ? await User.findById(sale.actor).select("_id name").lean()
     : null;
   const payments = await SalePayment.find({ saleId: sale._id }).sort({ date: 1, _id: 1 }).lean();
@@ -743,9 +459,6 @@ async function updateCreditSale(request, response) {
 async function createSale(request, response) {
   const { value, error } = validateSaleInput(request.body);
   if (error) return response.status(400).json({ error });
-  if (value.bonusDisabled && !SALE_ROLES.some((role) => request.authUser.roles?.includes(role))) {
-    return response.status(403).json({ error: "You do not have permission to disable sales bonuses." });
-  }
   try {
     const result = await mongoose.connection.transaction(async (session) => {
       const requestHash = createHash("sha256")
@@ -758,8 +471,6 @@ async function createSale(request, response) {
           initialPaymentAmount: value.initialPaymentAmount,
           initialPaymentMethod: value.initialPaymentMethod,
           initialPaymentTxnID: value.initialPaymentTxnID,
-          bonusDisabled: value.bonusDisabled,
-          bonusDisabledReason: value.bonusDisabledReason,
         }))
         .digest("hex");
       const existing = await Sale.findOne({ idempotencyKey: value.idempotencyKey }).session(session);
@@ -774,18 +485,22 @@ async function createSale(request, response) {
         await SalePayment.exists({ idempotencyKey: value.idempotencyKey }).session(session)) {
         throw invalid("This idempotency key was already used for a different payment.", 409);
       }
-      const productsById = new Map();
+      const variantsById = new Map();
       for (const line of value.lines) {
-        if (!productsById.has(line.productId)) {
-          const product = await FinishedProduct.findOne({ _id: line.productId, active: true }).session(session);
-          if (!product) throw invalid("A selected product is missing or inactive.", 409);
-          if (!product.packType || !Number.isInteger(product.piecesPerPack) || product.piecesPerPack < 1) {
-            throw invalid(`${product.name} must have valid outer-pack details before it can be sold.`, 409);
+        const id = line.variantId;
+        if (!variantsById.has(id)) {
+          const variant = await BakeryProductVariant.findOne({ _id: id, active: true }).session(session);
+          if (!variant) throw invalid("A selected bakery variant is missing or inactive.", 409);
+          const family = await BakeryProductFamily.findOne({ _id: variant.familyId, active: true }).session(session).lean();
+          if (!family) throw invalid("A selected bakery variant belongs to a missing or inactive product family.", 409);
+          if (!variant.sku || !variant.name || !variant.saleUnit ||
+            !Number.isInteger(variant.unitsPerSaleUnit) || variant.unitsPerSaleUnit < 1) {
+            throw invalid(`${variant.name || variant.sku || "The selected bakery variant"} must have valid sale-unit details before it can be sold.`, 409);
           }
-          if (!Number.isInteger(product.price) || product.price < 1) {
-            throw invalid(`${product.name} does not have a valid catalog price. Update the product before selling it.`, 409);
+          if (!Number.isInteger(variant.price) || variant.price < 1) {
+            throw invalid(`${variant.name} does not have a valid catalog price. Update the variant before selling it.`, 409);
           }
-          productsById.set(line.productId, product);
+          variantsById.set(id, variant);
         }
         if (line.pricePerPack !== undefined && !SALE_ROLES.some((role) => request.authUser.roles?.includes(role))) {
           throw invalid("You do not have permission to override catalog prices.", 403);
@@ -802,46 +517,23 @@ async function createSale(request, response) {
       }
       if (value.paymentTerms === "Credit" && !customer) throw invalid("Credit sales require a saved customer account.");
 
-      const bonusSettingsDocument = await SalesBonusSettings.findById("global").session(session).lean();
-      const bonusSettings = normalizeSettings(bonusSettingsDocument);
-      const eligibleLinesByProduct = value.lines
-        .map((line) => {
-          const product = productsById.get(line.productId);
-          return { productId: String(product._id), packs: line.packs, packType: product.packType };
-        })
-        .filter((line) => line.packType === "Box")
-        .reduce((totals, line) => {
-          totals.set(line.productId, {
-            productId: line.productId,
-            packs: (totals.get(line.productId)?.packs ?? 0) + line.packs,
-          });
-          return totals;
-        }, new Map());
-      const eligibleLines = [...eligibleLinesByProduct.values()];
-      const qualifyingBoxes = eligibleLines.reduce((sum, line) => sum + line.packs, 0);
-      const bonusCalculation = value.bonusDisabled || !bonusSettings.enabled
-        ? { bonusQuantity: 0, tier: null }
-        : calculateSalesBonus(qualifyingBoxes, bonusSettings);
-      const allocatedBonus = allocateBonus(eligibleLines, bonusCalculation.bonusQuantity);
-      const bonusByProduct = new Map(allocatedBonus.map((line) => [line.productId, line.bonusPacks]));
       const saleLines = value.lines.map((line) => {
-        const product = productsById.get(line.productId);
+        const product = variantsById.get(line.variantId);
         const pricePerPack = line.pricePerPack ?? product.price;
-        const quantityPieces = line.packs * product.piecesPerPack;
+        const unitsPerPack = product.unitsPerSaleUnit;
+        const quantityPieces = line.packs * unitsPerPack;
         const lineTotal = line.packs * pricePerPack;
-        const bonusPacks = bonusByProduct.get(String(product._id)) ?? 0;
         if (!Number.isSafeInteger(quantityPieces) || !Number.isSafeInteger(lineTotal) || lineTotal < 1) {
           throw invalid("Sale quantities and totals exceed supported values.");
         }
         return {
-          productId: product._id,
-          productCode: product.code,
+          variantId: product._id,
+          productCode: product.sku,
+          sku: product.sku,
           productName: product.name,
-          packType: product.packType,
-          piecesPerPack: product.piecesPerPack,
+          saleUnit: product.saleUnit,
+          unitsPerSaleUnit: product.unitsPerSaleUnit,
           packs: line.packs,
-          bonusPacks,
-          totalStockPacks: line.packs + bonusPacks,
           quantityPieces,
           catalogPricePerPack: product.price,
           pricePerPack,
@@ -880,54 +572,21 @@ async function createSale(request, response) {
         createdByName: request.authUser.name || "",
         idempotencyKey: value.idempotencyKey,
         requestHash,
-        bonusSnapshot: {
-          enabled: bonusSettings.enabled && !value.bonusDisabled,
-          settingsVersion: bonusSettingsDocument?.version ?? 1,
-          qualifyingBoxes,
-          bonusBoxes: bonusCalculation.bonusQuantity,
-          tier: bonusCalculation.tier || "",
-          calculatedAt: new Date(),
-        },
-        bonusDisabledReason: value.bonusDisabledReason,
       }], { session });
       for (const [index, line] of saleLines.entries()) {
-        const packLabel = line.packType === "Box"
-          ? line.packs === 1 ? "box" : "boxes"
-          : line.packs === 1 ? "carton" : "cartons";
-        await recordFinishedStockMovement({
-          productId: line.productId,
-          type: "Sales dispatch",
-          direction: "out",
-          quantityPacks: line.packs,
-          packTypeSnapshot: line.packType,
-          piecesPerPackSnapshot: line.piecesPerPack,
+        await dispatchBakerySaleLots({
+          variantId: line.variantId,
+          quantity: line.packs,
           date,
           reference: receiptNumber,
           sourceType: "sale",
-          sourceId: sale._id,
-          idempotencyKey: `${value.idempotencyKey}:${index}`,
-          reason: `Sale of ${line.packs} ${packLabel}`,
-          productName: line.productName,
-          actor: actorId(request),
-        }, session);
-        if (line.bonusPacks > 0) {
-          await recordFinishedStockMovement({
-            productId: line.productId,
-            type: "Sales bonus dispatch",
-            direction: "out",
-            quantityPacks: line.bonusPacks,
-            packTypeSnapshot: line.packType,
-            piecesPerPackSnapshot: line.piecesPerPack,
-            date,
-            reference: receiptNumber,
-            sourceType: "sale",
-            sourceId: sale._id,
-            idempotencyKey: `${value.idempotencyKey}:${index}:bonus`,
-            reason: `Sales bonus of ${line.bonusPacks} box${line.bonusPacks === 1 ? "" : "es"}`,
-            productName: line.productName,
-            actor: actorId(request),
-          }, session);
-        }
+          saleId: sale._id,
+          idempotencyKey: value.idempotencyKey,
+          lineIndex: index,
+          reason: `Sale of ${line.packs} ${line.saleUnit}${line.packs === 1 ? "" : "s"}`,
+          actorId: actorId(request),
+          session,
+        });
       }
       const payments = [];
       if (value.initialPaymentAmount > 0) {
@@ -964,6 +623,7 @@ async function createSale(request, response) {
           lineCount: saleLines.length,
           total,
           stockDispatchPosted: true,
+          stockDispatchSource: "finished-stock-lots",
         },
         transaction: session,
       });
@@ -1032,13 +692,10 @@ module.exports = {
   createSale,
   getSale,
   getCreditStatement,
-  importLegacySales,
   listSales,
   listSalesOwners,
   recordPayment,
   updateCreditSale,
-  validateLegacyPaymentInput,
-  validateLegacySaleInput,
   validatePaymentInput,
   validateSaleTotals,
   validateSaleInput,

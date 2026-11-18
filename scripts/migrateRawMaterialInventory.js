@@ -8,7 +8,6 @@ mongoose.set("autoIndex", false);
 const RawMaterial = require("../models/rawMaterial");
 const RawMaterialBalance = require("../models/rawMaterialBalance");
 const RawMaterialMovement = require("../models/rawMaterialMovement");
-const ProductionRecipe = require("../models/productionRecipe");
 const User = require("../models/user");
 const audit = require("../lib/audit");
 const { recordRawMaterialMovement } = require("../lib/productionInventory");
@@ -264,7 +263,6 @@ async function migrate(payload, actorId, apply, acceptReconciliation = false) {
   }
 
   const db = await inspectDatabase(preview);
-  const recipeCount = await ProductionRecipe.collection.countDocuments({ "ingredients.quantityPerPiece": { $exists: true } });
   if (!apply) {
     return {
       mode: "dry-run",
@@ -274,7 +272,6 @@ async function migrate(payload, actorId, apply, acceptReconciliation = false) {
       existingMaterialCodesMatched: db.matched,
       conflicts: db.conflicts,
       balanceReconciliation: preview.reconciliation,
-      legacyRecipesNeedingPerTankField: recipeCount,
       browserLocalRecipesForManualReview: Array.isArray(payload.productionRecipes) ? payload.productionRecipes.length : 0,
       browserLocalProductionRunsForManualReview: Array.isArray(payload.productionRuns) ? payload.productionRuns.length : 0,
       notes: [
@@ -451,22 +448,6 @@ async function migrate(payload, actorId, apply, acceptReconciliation = false) {
         }
       }
 
-      const legacyRecipes = await ProductionRecipe.collection.find(
-        { "ingredients.quantityPerPiece": { $exists: true } },
-        { session },
-      ).toArray();
-      for (const recipe of legacyRecipes) {
-        const ingredients = recipe.ingredients.map((ingredient) => {
-          if (ingredient.quantityPerTank !== undefined) return ingredient;
-          const { quantityPerPiece, ...rest } = ingredient;
-          return { ...rest, quantityPerTank: quantityPerPiece };
-        });
-        await ProductionRecipe.collection.updateOne(
-          { _id: recipe._id },
-          { $set: { ingredients, tankVolumeLitres: 1000 } },
-          { session },
-        );
-      }
       convertedRecipeCount = legacyRecipes.length;
 
       await audit.recordAudit({

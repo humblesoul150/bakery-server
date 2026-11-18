@@ -134,6 +134,7 @@ const AUDIT_EVENT_TYPES = [
   "sale.created",
   "sale.payment_recorded",
   "sale.legacy_imported",
+  "sale.legacy_purged",
   "receipt.favorite_updated",
   "receipt.archived",
   "receipt.restored",

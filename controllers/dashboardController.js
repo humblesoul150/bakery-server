@@ -1,7 +1,6 @@
 const Sale = require("../models/sale");
 const SalePayment = require("../models/salePayment");
 const Order = require("../models/order");
-const ProductionRun = require("../models/productionRun");
 const RawMaterialAlert = require("../models/rawMaterialAlert");
 const Expense = require("../models/expense");
 const AttendanceRecord = require("../models/attendanceRecord");
@@ -13,7 +12,6 @@ const loadSummary = createDashboardSummary({
   Sale,
   SalePayment,
   Order,
-  ProductionRun,
   RawMaterialAlert,
   Expense,
   AttendanceRecord,

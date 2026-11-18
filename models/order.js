@@ -6,27 +6,15 @@ const orderLineSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       default: () => new mongoose.Types.ObjectId(),
     },
-    productId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "FinishedProduct",
-      default: null,
-    },
     variantId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "BakeryProductVariant",
-      default: null,
+      required: true,
     },
     productCode: { type: String, trim: true, maxlength: 40, default: "" },
     sku: { type: String, trim: true, uppercase: true, maxlength: 40, default: "" },
     productName: { type: String, required: true, trim: true, maxlength: 160 },
-    packType: { type: String, enum: ["Box", "Carton"], default: null },
     saleUnit: { type: String, trim: true, maxlength: 40, default: "" },
-    piecesPerPack: {
-      type: Number,
-      min: 1,
-      validate: Number.isInteger,
-      default: undefined,
-    },
     unitsPerSaleUnit: {
       type: Number,
       min: 1,
@@ -141,9 +129,9 @@ const orderSchema = new mongoose.Schema(
     promisedDate: { type: String, match: /^\d{4}-\d{2}-\d{2}$/ },
     fulfillmentMode: {
       type: String,
-      enum: ["legacy_stock", "bakery_stock", "preorder"],
+      enum: ["bakery_stock", "preorder"],
       required: true,
-      default: "legacy_stock",
+      default: "bakery_stock",
       index: true,
     },
     fulfilmentMethod: {
@@ -192,14 +180,6 @@ const orderSchema = new mongoose.Schema(
       sparse: true,
     },
     requestHash: { type: String, trim: true, maxlength: 64 },
-    legacyId: {
-      type: String,
-      trim: true,
-      maxlength: 100,
-      unique: true,
-      sparse: true,
-    },
-    legacyImported: { type: Boolean, default: false },
     actor: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

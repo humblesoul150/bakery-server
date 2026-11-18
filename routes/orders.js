@@ -45,7 +45,9 @@ router.use(authenticate, requirePasswordChanged);
 router.get("/", reader, controller.listOrders);
 router.get("/production-demand", reader, controller.listPreorderDemand);
 router.get("/bakery-catalog", reader, controller.listBakeryOrderCatalog);
-router.post("/legacy-import", writer, controller.importLegacyOrders);
+router.post("/legacy-import", (_request, response) =>
+  response.status(410).json({ error: "Legacy order imports are no longer supported." }),
+);
 router.post("/", creator, controller.createOrder);
 router.get("/:id", reader, controller.getOrder);
 router.put("/:id", writer, controller.updateOrder);

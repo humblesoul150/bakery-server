@@ -7,12 +7,11 @@
     "test": "node --test",
     "migrate:raw-materials": "node scripts/migrateRawMaterialInventory.js",
     "migrate:raw-material-lots": "node scripts/migrateRawMaterialLots.js",
-    "migrate:finished-stock-packs": "node scripts/migrateFinishedStockToPacks.js",
-    "migrate:bakery-catalog": "node scripts/migrateBakeryCatalog.js",
     "seed:sourdough-catalog": "node scripts/seedSourdoughCatalog.js",
     "migrate:production-material-usage-index": "node scripts/migrateProductionMaterialUsageRunIndex.js",
     "backfill:bakery-first-published-at": "node scripts/backfillBakeryFirstPublishedAt.js",
     "backfill:credit-payment-receipts": "node scripts/backfillCreditPaymentReceipts.js",
+    "purge:legacy-sales": "node scripts/purgeLegacySales.js",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },

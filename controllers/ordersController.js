@@ -1,8 +1,6 @@
 const mongoose = require("mongoose");
 const { createHash } = require("node:crypto");
 const Customer = require("../models/customer");
-const FinishedProduct = require("../models/finishedProduct");
-const FinishedStockBalance = require("../models/finishedStockBalance");
 const BakeryProductFamily = require("../models/bakeryProductFamily");
 const BakeryProductVariant = require("../models/bakeryProductVariant");
 const FinishedStockLot = require("../models/finishedStockLot");
@@ -18,7 +16,6 @@ const {
   allocateCreditPaymentReceiptNumber,
 } = require("../lib/creditPaymentReceipt");
 const audit = require("../lib/audit");
-const { recordFinishedStockMovement } = require("../lib/productionInventory");
 const {
   consumeBakeryOrderReservations,
   orderFullyReserved,
@@ -125,28 +122,24 @@ function validateOrderFields(body, partial = false) {
       Array.isArray(item) ||
       Object.keys(item).some(
         (key) =>
-          !["productId", "variantId", "packs", "pricePerPack", "overrideReason"].includes(key),
+          !["variantId", "packs", "pricePerPack", "overrideReason"].includes(key),
       )
     ) {
       return {
         error:
-          "Each order line must contain a product or bakery SKU, a whole-unit quantity, and optional price override.",
+          "Each order line must contain a bakery SKU, a whole-unit quantity, and optional price override.",
       };
     }
     if (
-      Boolean(item.productId) === Boolean(item.variantId) ||
-      (item.productId && !objectId(item.productId)) ||
-      (item.variantId && !objectId(item.variantId))
+      !objectId(item.variantId)
     ) {
-      return { error: "Choose exactly one valid finished product or bakery SKU for every line." };
+      return { error: "Choose a valid bakery SKU for every line." };
     }
     const packs = Number(item.packs);
     if (!Number.isInteger(packs) || packs < 1)
       return { error: "Pack quantity must be a positive whole number." };
     const line = {
-      ...(item.productId
-        ? { productId: String(new mongoose.Types.ObjectId(item.productId)) }
-        : { variantId: String(new mongoose.Types.ObjectId(item.variantId)) }),
+      variantId: String(new mongoose.Types.ObjectId(item.variantId)),
       packs,
     };
     if (item.pricePerPack !== undefined) {
@@ -173,26 +166,12 @@ function validateOrderFields(body, partial = false) {
     items.push(line);
   }
   if (body.items !== undefined) {
-    const hasLegacyLines = items.some((item) => item.productId);
-    const hasBakeryLines = items.some((item) => item.variantId);
-    if (hasLegacyLines && hasBakeryLines) {
-      return { error: "An order cannot mix legacy products and bakery SKUs." };
-    }
-    if (hasLegacyLines && body.fulfillmentMode && body.fulfillmentMode !== "legacy_stock") {
-      return { error: "Legacy product lines can only use legacy stock fulfillment." };
-    }
-    if (
-      hasBakeryLines &&
-      !["bakery_stock", "preorder"].includes(body.fulfillmentMode)
-    ) {
-      return { error: "Bakery SKU orders must choose stock fulfillment or preorder." };
-    }
   }
   if (
     body.fulfillmentMode !== undefined &&
-    !["legacy_stock", "bakery_stock", "preorder"].includes(body.fulfillmentMode)
+    !["bakery_stock", "preorder"].includes(body.fulfillmentMode)
   ) {
-    return { error: "Choose legacy stock, bakery stock, or preorder fulfillment." };
+    return { error: "Choose bakery stock or preorder fulfillment." };
   }
   if (body.requestedDate !== undefined && !validDate(body.requestedDate))
     return { error: "Requested date must be a valid YYYY-MM-DD date." };
@@ -266,15 +245,11 @@ async function resolveOrderData(input, request, session) {
     );
   if (input.paymentTerms === "Credit" && !input.dueDate)
     throw invalid("Credit orders require a due date.");
-  const fulfillmentMode = input.fulfillmentMode || "legacy_stock";
-  const isBakeryOrder = fulfillmentMode !== "legacy_stock";
-  const productMap = new Map();
+  const fulfillmentMode = input.fulfillmentMode || "bakery_stock";
   const variantMap = new Map();
   for (const item of input.items) {
-    if (isBakeryOrder) {
-      if (!item.variantId) throw invalid("Bakery orders require a sellable bakery SKU on every line.");
-      if (!variantMap.has(item.variantId)) {
-        const variant = await BakeryProductVariant.findOne({
+    if (!variantMap.has(item.variantId)) {
+      const variant = await BakeryProductVariant.findOne({
           _id: item.variantId,
           active: true,
         })
@@ -296,33 +271,7 @@ async function resolveOrderData(input, request, session) {
         ) {
           throw invalid(`${variant.name} needs valid sale-unit details and a catalog price before it can be ordered.`, 409);
         }
-        variantMap.set(item.variantId, variant);
-      }
-    } else {
-      if (!item.productId) throw invalid("Legacy orders require a finished product on every line.");
-      if (!productMap.has(item.productId)) {
-        const product = await FinishedProduct.findOne({
-          _id: item.productId,
-          active: true,
-        })
-          .session(session)
-          .lean();
-        if (!product)
-          throw invalid("A selected product is missing or inactive.", 409);
-        if (
-          !product.packType ||
-          !Number.isInteger(product.piecesPerPack) ||
-          product.piecesPerPack < 1 ||
-          !Number.isInteger(product.price) ||
-          product.price < 1
-        ) {
-          throw invalid(
-            `${product.name} needs valid pack details and a catalog price before it can be ordered.`,
-            409,
-          );
-        }
-        productMap.set(item.productId, product);
-      }
+      variantMap.set(item.variantId, variant);
     }
     if (
       item.pricePerPack !== undefined &&
@@ -335,9 +284,9 @@ async function resolveOrderData(input, request, session) {
     }
   }
   const lines = input.items.map((item) => {
-    const product = isBakeryOrder ? variantMap.get(item.variantId) : productMap.get(item.productId);
+    const product = variantMap.get(item.variantId);
     const pricePerPack = item.pricePerPack ?? product.price;
-    const unitsPerSaleUnit = isBakeryOrder ? product.unitsPerSaleUnit : product.piecesPerPack;
+    const unitsPerSaleUnit = product.unitsPerSaleUnit;
     const quantityPieces = item.packs * unitsPerSaleUnit;
     const lineTotal = item.packs * pricePerPack;
     if (
@@ -349,15 +298,12 @@ async function resolveOrderData(input, request, session) {
     }
     return {
       lineId: new mongoose.Types.ObjectId(),
-      productId: isBakeryOrder ? null : product._id,
-      variantId: isBakeryOrder ? product._id : null,
-      productCode: isBakeryOrder ? product.sku : product.code,
-      sku: isBakeryOrder ? product.sku : "",
+      variantId: product._id,
+      productCode: product.sku,
+      sku: product.sku,
       productName: product.name,
-      packType: isBakeryOrder ? undefined : product.packType,
-      saleUnit: isBakeryOrder ? product.saleUnit : "",
-      piecesPerPack: isBakeryOrder ? undefined : product.piecesPerPack,
-      unitsPerSaleUnit: isBakeryOrder ? product.unitsPerSaleUnit : undefined,
+      saleUnit: product.saleUnit,
+      unitsPerSaleUnit: product.unitsPerSaleUnit,
       packs: item.packs,
       quantityPieces,
       catalogPricePerPack: product.price,
@@ -384,101 +330,6 @@ async function resolveOrderData(input, request, session) {
     total,
     fulfillmentMode,
   };
-}
-
-async function ensureStockBalance(productId, userId, session) {
-  const existing = await FinishedStockBalance.findOne({ productId })
-    .session(session)
-    .lean();
-  if (existing && existing.inventoryUnit !== "pack") {
-    throw invalid(
-      "Finished stock has not been migrated to box/carton units. Run the finished-stock migration first.",
-      409,
-    );
-  }
-  if (!existing) {
-    await FinishedStockBalance.create(
-      [
-        {
-          productId,
-          inventoryUnit: "pack",
-          quantityPacks: 0,
-          reservedPacks: 0,
-          loosePieces: 0,
-          openingQuantityPacks: 0,
-          inventoryEffectiveDate: today(),
-          updatedBy: userId,
-        },
-      ],
-      { session },
-    );
-  }
-}
-
-async function reserveOrderStock(order, userId, session) {
-  const quantities = new Map();
-  for (const item of order.items) {
-    if (!item.productId || !Number.isInteger(item.packs) || item.packs < 1)
-      throw invalid(
-        "Legacy order lines must be reviewed and replaced before stock can be reserved.",
-        409,
-      );
-    const key = String(item.productId);
-    quantities.set(key, (quantities.get(key) ?? 0) + item.packs);
-  }
-  for (const [productId, quantityPacks] of quantities) {
-    await ensureStockBalance(productId, userId, session);
-    const result = await FinishedStockBalance.updateOne(
-      {
-        productId,
-        $expr: {
-          $gte: [
-            {
-              $subtract: ["$quantityPacks", { $ifNull: ["$reservedPacks", 0] }],
-            },
-            quantityPacks,
-          ],
-        },
-      },
-      { $inc: { reservedPacks: quantityPacks }, $set: { updatedBy: userId } },
-      { session },
-    );
-    if (!result.modifiedCount)
-      throw invalid(
-        "There is not enough unreserved finished stock to confirm this order.",
-        409,
-      );
-  }
-}
-
-async function releaseOrderReservation(order, userId, session) {
-  if (!order.reserved) return;
-  const quantities = new Map();
-  for (const item of order.items) {
-    const key = String(item.productId);
-    if (!item.productId || !Number.isInteger(item.packs) || item.packs < 1)
-      throw invalid(
-        "Legacy order lines cannot be safely released; contact an administrator.",
-        409,
-      );
-    quantities.set(key, (quantities.get(key) ?? 0) + item.packs);
-  }
-  for (const [productId, quantityPacks] of quantities) {
-    const result = await FinishedStockBalance.updateOne(
-      {
-        productId,
-        reservedPacks: { $gte: quantityPacks },
-      },
-      { $inc: { reservedPacks: -quantityPacks }, $set: { updatedBy: userId } },
-      { session },
-    );
-    if (!result.modifiedCount)
-      throw invalid(
-        "The order stock reservation is inconsistent; contact an administrator.",
-        409,
-      );
-  }
-  order.reserved = false;
 }
 
 async function listOrders(request, response) {
@@ -744,7 +595,7 @@ async function updateOrder(request, response) {
     const result = await mongoose.connection.transaction(async (session) => {
       const order = await Order.findById(request.params.id).session(session);
       if (!order) throw invalid("Order not found.", 404);
-      if (order.status !== "Pending" || order.reserved || order.legacyImported)
+      if (order.status !== "Pending" || order.reserved)
         throw invalid("Only pending, unreserved orders can be edited.", 409);
       const merged = { ...order.toObject(), ...value };
       const resolved = await resolveOrderData(merged, request, session);
@@ -815,7 +666,7 @@ async function confirmOrder(request, response) {
     const order = await mongoose.connection.transaction(async (session) => {
       const current = await Order.findById(request.params.id).session(session);
       if (!current) throw invalid("Order not found.", 404);
-      if (current.status !== "Pending" || current.legacyImported)
+      if (current.status !== "Pending")
         throw invalid("Only a new pending order can be confirmed.", 409);
       if (current.fulfillmentMode === "preorder") {
         if (!body.promisedDate) {
@@ -827,11 +678,7 @@ async function confirmOrder(request, response) {
         current.promisedDate = body.promisedDate;
       } else {
         current.promisedDate = body.promisedDate || current.requestedDate;
-        if (current.fulfillmentMode === "bakery_stock") {
-          await reserveBakeryStockOrder(current, actorId(request), session);
-        } else {
-          await reserveOrderStock(current, actorId(request), session);
-        }
+        await reserveBakeryStockOrder(current, actorId(request), session);
         current.reserved = true;
       }
       current.status = "Confirmed";
@@ -907,8 +754,6 @@ async function changeOrderStatus(request, response) {
     const order = await mongoose.connection.transaction(async (session) => {
       const current = await Order.findById(request.params.id).session(session);
       if (!current) throw invalid("Order not found.", 404);
-      if (current.legacyImported)
-        throw invalid("Legacy orders are read-only.", 409);
       const allowed =
         (current.status === "Confirmed" && status === "In progress") ||
         (current.status === "In progress" && status === "Ready") ||
@@ -925,7 +770,7 @@ async function changeOrderStatus(request, response) {
           409,
         );
       }
-      if (status === "Ready" && current.fulfillmentMode !== "legacy_stock") {
+      if (status === "Ready") {
         if (!(await orderFullyReserved(current, session))) {
           throw invalid(
             "The order cannot be marked Ready until every line is allocated to eligible bakery lots.",
@@ -935,11 +780,7 @@ async function changeOrderStatus(request, response) {
         current.reserved = true;
       }
       if (status === "Cancelled") {
-        if (current.fulfillmentMode !== "legacy_stock") {
-          await releaseBakeryOrderReservations(current, actorId(request), session);
-        } else if (current.reserved) {
-          await releaseOrderReservation(current, actorId(request), session);
-        }
+        await releaseBakeryOrderReservations(current, actorId(request), session);
       }
       const previous = current.status;
       current.status = status;
@@ -1045,8 +886,6 @@ async function recordOrderPayment(request, response) {
           "Payments cannot be added to cancelled or fulfilled orders.",
           409,
         );
-      if (order.legacyImported)
-        throw invalid("Legacy orders are read-only.", 409);
       if (Number(body.amount) > order.total - order.paidAmount)
         throw invalid(
           "Payment cannot exceed the remaining order balance.",
@@ -1140,7 +979,7 @@ async function fulfillOrder(request, response) {
           replayed: true,
         };
       }
-      if (order.status !== "Ready" || !order.reserved || order.legacyImported) {
+      if (order.status !== "Ready" || !order.reserved) {
         throw invalid(
           "Only a confirmed, reserved order marked Ready can be fulfilled.",
           409,
@@ -1164,9 +1003,7 @@ async function fulfillOrder(request, response) {
           "Paid-now orders must be fully paid before fulfillment.",
           409,
         );
-      if (order.fulfillmentMode === "legacy_stock") {
-        await releaseOrderReservation(order, actorId(request), session);
-      } else if (!(await orderFullyReserved(order, session))) {
+      if (!(await orderFullyReserved(order, session))) {
         throw invalid("The order is not fully allocated to eligible bakery lots.", 409);
       }
 
@@ -1182,16 +1019,15 @@ async function fulfillOrder(request, response) {
         .session(session)
         .lean();
       const saleLines = order.items.map((item) => ({
-        productId: item.productId || null,
-        variantId: item.variantId || null,
+        variantId: item.variantId,
         productCode: item.productCode,
         sku: item.sku || "",
         productName: item.productName,
-        packType: item.packType || undefined,
         saleUnit: item.saleUnit || "",
-        piecesPerPack: item.piecesPerPack || undefined,
         unitsPerSaleUnit: item.unitsPerSaleUnit || undefined,
         packs: item.packs,
+        bonusPacks: 0,
+        totalStockPacks: item.packs,
         quantityPieces: item.quantityPieces,
         catalogPricePerPack: item.catalogPricePerPack,
         pricePerPack: item.pricePerPack,
@@ -1219,38 +1055,13 @@ async function fulfillOrder(request, response) {
         ],
         { session },
       );
-      for (const [index, item] of saleLines.entries()) {
-        if (order.fulfillmentMode === "legacy_stock") {
-          await recordFinishedStockMovement(
-          {
-            productId: item.productId,
-            type: "Sales dispatch",
-            direction: "out",
-            quantityPacks: item.packs,
-            packTypeSnapshot: item.packType,
-            piecesPerPackSnapshot: item.piecesPerPack,
-            date,
-            reference: receiptNumber,
-            sourceType: "sale",
-            sourceId: sale._id,
-            idempotencyKey: `order-sale-${order._id}:${index}`,
-            reason: `Fulfilled order ${order.orderNumber}`,
-            productName: item.productName,
-            actor: actorId(request),
-          },
-          session,
-          );
-        }
-      }
-      if (order.fulfillmentMode !== "legacy_stock") {
-        await consumeBakeryOrderReservations(
-          order,
-          actorId(request),
-          date,
-          receiptNumber,
-          session,
-        );
-      }
+      await consumeBakeryOrderReservations(
+        order,
+        actorId(request),
+        date,
+        receiptNumber,
+        session,
+      );
       for (const payment of payments) {
         const [salePayment] = await SalePayment.create(
           [
@@ -1390,195 +1201,6 @@ async function setArchived(request, response, archived) {
   }
 }
 
-async function importLegacyOrders(request, response) {
-  const { orders } = request.body ?? {};
-  if (!Array.isArray(orders) || orders.length > 200)
-    return response
-      .status(400)
-      .json({ error: "Import between 1 and 200 legacy orders per request." });
-  const imported = [];
-  const duplicates = [];
-  const rejected = [];
-  for (const legacy of orders) {
-    if (
-      !legacy ||
-      typeof legacy !== "object" ||
-      typeof legacy.id !== "string" ||
-      typeof legacy.reference !== "string" ||
-      !validDate(legacy.date) ||
-      typeof legacy.customer !== "string" ||
-      !Array.isArray(legacy.items) ||
-      !legacy.items.length ||
-      !Number.isSafeInteger(Number(legacy.total)) ||
-      Number(legacy.total) < 1
-    ) {
-      rejected.push({
-        id: legacy?.id ?? "",
-        reason: "Legacy order has invalid required fields.",
-      });
-      continue;
-    }
-    try {
-      const result = await mongoose.connection.transaction(async (session) => {
-        const existing = await Order.findOne({ legacyId: legacy.id }).session(
-          session,
-        );
-        if (existing) return { duplicate: true, order: existing };
-        const existingRef = await Order.findOne({
-          orderNumber: legacy.reference,
-        }).session(session);
-        if (existingRef)
-          throw invalid(
-            "Order reference already belongs to a different record.",
-            409,
-          );
-        const customer =
-          typeof legacy.customerId === "string" && legacy.customerId.trim()
-            ? await Customer.findOne({
-                id: legacy.customerId,
-                status: "Active",
-                archivedAt: null,
-              })
-                .session(session)
-                .lean()
-            : null;
-        const total = Number(legacy.total);
-        const items = legacy.items.map((item, index) => {
-          const quantity = Number(item.quantity);
-          const lineTotal = Number(item.lineTotal);
-          const unitPrice = Number(item.unitPrice);
-          if (
-            !Number.isSafeInteger(quantity) ||
-            quantity < 1 ||
-            !Number.isSafeInteger(lineTotal) ||
-            lineTotal < 1 ||
-            !Number.isSafeInteger(unitPrice) ||
-            unitPrice < 0
-          ) {
-            throw invalid(
-              `Legacy line ${index + 1} has invalid quantities or totals.`,
-            );
-          }
-          return {
-            productId: null,
-            productName: String(item.product || "Historic item").slice(0, 160),
-            packs: quantity,
-            pricePerPack: unitPrice,
-            lineTotal,
-          };
-        });
-        const status = [
-          "Pending",
-          "Confirmed",
-          "In progress",
-          "Ready",
-          "Completed",
-          "Cancelled",
-        ].includes(legacy.status)
-          ? legacy.status
-          : "Pending";
-        const date = legacy.date;
-        const year = Number(date.slice(0, 4));
-        const counter = await OrderSequence.findOneAndUpdate(
-          { _id: year },
-          { $inc: { sequence: 1 }, $setOnInsert: { _id: year } },
-          { new: true, upsert: true, session, setDefaultsOnInsert: true },
-        );
-        const [record] = await Order.create(
-          [
-            {
-              orderNumber: legacy.reference,
-              orderYear: year,
-              orderSequence: counter.sequence,
-              legacyId: legacy.id,
-              legacyImported: true,
-              customerId:
-                customer?.id ||
-                String(legacy.customerId || `LEGACY-${legacy.id}`).slice(0, 80),
-              customer: customer
-                ? {
-                    name: customer.name,
-                    contact: customer.contact || "",
-                    phone: customer.phone || "",
-                    email: customer.email || "",
-                    address: [
-                      customer.district,
-                      customer.region,
-                      customer.country,
-                    ]
-                      .filter(Boolean)
-                      .join(", "),
-                    tin: customer.tin || "",
-                  }
-                : { name: legacy.customer.slice(0, 180) },
-              items,
-              total,
-              date,
-              requestedDate: validDate(legacy.requestedDate)
-                ? legacy.requestedDate
-                : date,
-              fulfilmentMethod:
-                legacy.fulfilmentMethod === "Pickup" ? "Pickup" : "Delivery",
-              destination: String(legacy.destination || "").slice(0, 500),
-              paymentTerms: ["Paid now", "Same-day", "Credit"].includes(
-                legacy.paymentTerms,
-              )
-                ? legacy.paymentTerms
-                : "Same-day",
-              status,
-              statusHistory: [
-                {
-                  type: "legacy_imported",
-                  toStatus: status,
-                  at: new Date(),
-                  actor: actorId(request),
-                },
-              ],
-              completedAt:
-                status === "Completed"
-                  ? new Date(legacy.completedAt || `${date}T12:00:00.000Z`)
-                  : null,
-              priority: legacy.priority === "High" ? "High" : "Normal",
-              priorityReason: String(legacy.priorityReason || "").slice(0, 500),
-              archivedAt: legacy.archivedAt
-                ? new Date(legacy.archivedAt)
-                : null,
-              notes: String(legacy.notes || "").slice(0, 2000),
-              reserved: false,
-              actor: actorId(request),
-              updatedBy: actorId(request),
-            },
-          ],
-          { session },
-        );
-        await audit.recordAudit({
-          request,
-          eventType: "order.legacy_imported",
-          outcome: "success",
-          details: {
-            orderId: String(record._id),
-            legacyId: legacy.id,
-            orderNumber: record.orderNumber,
-          },
-          transaction: session,
-        });
-        return { duplicate: false, order: record };
-      });
-      (result.duplicate ? duplicates : imported).push(legacy.id);
-    } catch (error) {
-      rejected.push({
-        id: legacy.id,
-        reason: error.statusCode
-          ? error.message
-          : "Order could not be imported.",
-      });
-    }
-  }
-  return response
-    .status(rejected.length ? 207 : 201)
-    .json({ imported, duplicates, rejected });
-}
-
 function nextError(error, response) {
   if (error?.statusCode)
     return response.status(error.statusCode).json({ error: error.message });
@@ -1600,8 +1222,7 @@ module.exports = {
   confirmOrder,
   createOrder,
   fulfillOrder,
-  getOrder,
-  importLegacyOrders,
+  getOrder,
   listOrders,
   listPreorderDemand,
   listBakeryOrderCatalog,

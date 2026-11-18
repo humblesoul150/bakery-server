@@ -22,7 +22,9 @@ async function requireSalesRole(request, response, next) {
 
 router.use(authenticate, requirePasswordChanged, requireSalesRole);
 router.get("/", controller.listSales);
-router.post("/legacy-import", controller.importLegacySales);
+router.post("/legacy-import", (_request, response) =>
+  response.status(410).json({ error: "Legacy sales imports are no longer supported." }),
+);
 router.post("/", controller.createSale);
 router.get("/owners", controller.listSalesOwners);
 router.get("/credit-customers/:customerId/statement", controller.getCreditStatement);

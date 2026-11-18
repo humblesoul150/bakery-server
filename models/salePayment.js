@@ -11,7 +11,6 @@ const salePaymentSchema = new mongoose.Schema(
     method: { type: String, enum: [...METHODS, "Legacy"], required: true },
     txnID: { type: String, trim: true, maxlength: 120, default: "" },
     note: { type: String, trim: true, maxlength: 500, default: "" },
-    legacyId: { type: String, trim: true, maxlength: 140, sparse: true, unique: true },
     orderPaymentId: { type: mongoose.Schema.Types.ObjectId, ref: "OrderPayment", unique: true, sparse: true },
     idempotencyKey: { type: String, trim: true, maxlength: 120, sparse: true, unique: true },
     actor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },

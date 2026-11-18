@@ -1,5 +1,5 @@
 const express = require("express");
-const controller = require("../controllers/productionController");
+const rawMaterialController = require("../controllers/rawMaterialController");
 const { authenticate, requirePasswordChanged } = require("../middleware/authentication");
 const audit = require("../lib/audit");
 const { hasAnyDepartmentRole } = require("../lib/authorization");
@@ -9,12 +9,6 @@ const bakeryController = require("../controllers/bakeryProductionController");
 const readRoles = ["Admin", "General Manager", "Production Manager", "Inventory Manager"];
 const productionWriteRoles = ["Production Manager", "Inventory Manager"];
 const inventoryWriteRoles = ["Inventory Manager"];
-
-function markLegacyBeverageEndpoint(_request, response, next) {
-  response.set("X-Legacy-Workflow", "beverage");
-  response.set("X-Recommended-Workflow", "/api/production/bakery");
-  next();
-}
 
 function requireRoles(allowedRoles) {
   return async (request, response, next) => {
@@ -36,40 +30,34 @@ const reader = [...authenticated, requireRoles(readRoles)];
 const productionWriter = [...authenticated, requireRoles(productionWriteRoles)];
 const inventoryWriter = [...authenticated, requireRoles(inventoryWriteRoles)];
 
-router.get("/products", reader, controller.listProducts);
-router.post("/products", ...productionWriter, markLegacyBeverageEndpoint, controller.createProduct);
-router.patch("/products/:id", ...productionWriter, markLegacyBeverageEndpoint, controller.updateProduct);
-router.put("/products/:id/recipe", ...productionWriter, markLegacyBeverageEndpoint, controller.changeRecipe);
+for (const legacyPath of [
+  "/products",
+  "/products/:id",
+  "/products/:id/recipe",
+  "/stock/balances",
+  "/stock/finished/movements",
+  "/stock/finished/receipts",
+  "/stock/finished/adjustments",
+  "/runs",
+  "/runs/daily-stock-summary",
+]) {
+  router.all(legacyPath, ...authenticated, (_request, response) =>
+    response.status(410).json({ error: "Legacy beverage production and stock endpoints are no longer supported." }),
+  );
+}
 
-router.get("/materials", reader, controller.listMaterials);
-router.get("/materials/lots", reader, controller.listMaterialLots);
-router.post("/materials", inventoryWriter, controller.createMaterial);
-router.patch("/materials/:materialId", inventoryWriter, controller.updateMaterial);
-router.delete("/materials/:materialId", inventoryWriter, controller.deleteMaterial);
-router.get("/materials/responsible-users", reader, controller.listInventoryResponsibleUsers);
-router.get("/materials/low-stock", reader, controller.listLowStockAlerts);
-router.get("/materials/receipts", reader, controller.listMaterialReceipts);
-router.get("/materials/production-usages", reader, controller.listProductionMaterialUsages);
-router.post("/materials/production-usages", inventoryWriter, controller.legacyProductionMaterialUsageRetired);
-router.patch("/materials/production-usages/:id", inventoryWriter, controller.legacyProductionMaterialUsageRetired);
-router.put("/materials/:materialId/locations/:location", inventoryWriter, controller.configureMaterialLocation);
-router.post("/materials/:materialId/receipts", inventoryWriter, controller.receiveRawMaterial);
-router.get("/materials/movements", reader, controller.listRawMovements);
-router.post("/materials/transfers", inventoryWriter, controller.transferRawMaterial);
-router.post("/materials/adjustments", inventoryWriter, controller.adjustRawMaterial);
-router.get("/materials/counts", reader, controller.listRawMaterialCounts);
-router.post("/materials/counts/preview", inventoryWriter, controller.previewRawMaterialCount);
-router.post("/materials/counts/drafts", inventoryWriter, controller.saveRawMaterialCount);
-router.post("/materials/counts/submit", inventoryWriter, controller.submitRawMaterialCount);
+router.get("/materials", reader, rawMaterialController.listMaterials);
+router.get("/materials/lots", reader, rawMaterialController.listMaterialLots);
+router.post("/materials/:materialId/receipts", inventoryWriter, rawMaterialController.receiveRawMaterial);
+router.post("/materials/:materialId/adjustments", inventoryWriter, rawMaterialController.adjustRawMaterial);
+router.get("/materials/movements", reader, rawMaterialController.listMovements);
+router.all("/materials/production-usages", inventoryWriter, (_request, response) =>
+  response.status(410).json({ error: "Legacy beverage material usage endpoints are no longer supported." }),
+);
+router.all("/materials/production-usages/:id", inventoryWriter, (_request, response) =>
+  response.status(410).json({ error: "Legacy beverage material usage endpoints are no longer supported." }),
+);
 
-router.get("/stock/balances", reader, controller.listStockBalances);
-router.get("/stock/finished/movements", reader, controller.listFinishedMovements);
-router.post("/stock/finished/receipts", ...inventoryWriter, markLegacyBeverageEndpoint, controller.receiveFinishedStock);
-router.post("/stock/finished/adjustments", ...inventoryWriter, markLegacyBeverageEndpoint, controller.adjustFinishedStock);
-
-router.get("/runs", reader, controller.listProductionRuns);
-router.get("/runs/daily-stock-summary", reader, controller.getDailyProductionStockSummary);
-router.post("/runs", ...productionWriter, markLegacyBeverageEndpoint, controller.createProductionRun);
 
 router.get("/bakery/families", reader, bakeryController.listFamilies);
 router.post("/bakery/families", productionWriter, bakeryController.createFamily);

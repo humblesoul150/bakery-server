@@ -13,11 +13,18 @@ const ALLOWED_MUTATIONS = new Set([
   "/sessions/activity",
   "/receipts/bulk-export",
 ]);
+const ALLOWED_MUTATION_PREFIXES = [
+  "/storefront/messages/",
+  "/storefront/newsletter/",
+  "/website-communications/",
+  "/webhooks/resend",
+];
 
 function adminReadOnly(request, response, next) {
   if (
     SAFE_METHODS.has(request.method) ||
-    ALLOWED_MUTATIONS.has(request.path)
+    ALLOWED_MUTATIONS.has(request.path) ||
+    ALLOWED_MUTATION_PREFIXES.some((prefix) => request.path.startsWith(prefix))
   ) {
     return next();
   }

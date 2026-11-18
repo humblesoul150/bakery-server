@@ -13,7 +13,6 @@ const packagingMaterialSchema = new mongoose.Schema(
 const bakeryProductVariantSchema = new mongoose.Schema(
   {
     familyId: { type: mongoose.Schema.Types.ObjectId, ref: "BakeryProductFamily", required: true, index: true },
-    legacyProductId: { type: mongoose.Schema.Types.ObjectId, ref: "FinishedProduct", default: undefined },
     sku: { type: String, required: true, trim: true, uppercase: true, maxlength: 40 },
     name: { type: String, required: true, trim: true, maxlength: 160 },
     saleUnit: { type: String, required: true, trim: true, maxlength: 40 },

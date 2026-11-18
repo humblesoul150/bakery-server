@@ -17,7 +17,7 @@ const {
 } = require("../lib/keysetCursor");
 const { orderFullyReserved } = require("../lib/finishedStockLotOrders");
 
-const productId = "507f1f77bcf86cd799439013";
+const variantId = "507f1f77bcf86cd799439013";
 const workDate = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Africa/Kampala",
   year: "numeric",
@@ -28,7 +28,7 @@ const workDate = new Intl.DateTimeFormat("en-CA", {
 function validOrder(overrides = {}) {
   return {
     customerId: "C-100",
-    items: [{ productId, packs: 2 }],
+    items: [{ variantId, packs: 2 }],
     requestedDate: workDate,
     fulfilmentMethod: "Delivery",
     paymentTerms: "Same-day",
@@ -47,7 +47,7 @@ test("order validation accepts catalog lines and rejects malformed values", () =
       validOrder({
         items: [
           {
-            productId,
+            variantId,
             packs: 2,
             pricePerPack: 24000,
             overrideReason: "Approved price",
@@ -62,14 +62,14 @@ test("order validation accepts catalog lines and rejects malformed values", () =
     /active saved customer/,
   );
   assert.match(
-    validateOrderFields(validOrder({ items: [{ productId, packs: 1.5 }] }))
+    validateOrderFields(    validOrder({ items: [{ variantId, packs: 1.5 }] }))
       .error,
     /positive whole number/,
   );
   assert.match(
     validateOrderFields(
       validOrder({
-        items: [{ productId, packs: 2, pricePerPack: 24000 }],
+        items: [{ variantId, packs: 2, pricePerPack: 24000 }],
       }),
     ).error,
     /reason/,
@@ -94,8 +94,7 @@ test("order validation accepts catalog lines and rejects malformed values", () =
   );
 });
 
-test("bakery orders require one fulfillment mode and reject mixed product families", () => {
-  const variantId = "507f1f77bcf86cd799439015";
+test("bakery orders require a supported bakery fulfillment mode", () => {
   assert.equal(
     validateOrderFields(
       validOrder({
@@ -106,28 +105,11 @@ test("bakery orders require one fulfillment mode and reject mixed product famili
     undefined,
   );
   assert.match(
-    validateOrderFields(
-      validOrder({ items: [{ variantId, packs: 1 }] }),
-    ).error,
-    /must choose stock fulfillment or preorder/,
-  );
-  assert.match(
-    validateOrderFields(
-      validOrder({
-        fulfillmentMode: "preorder",
-        items: [{ variantId, packs: 1 }, { productId, packs: 1 }],
-      }),
-    ).error,
-    /cannot mix legacy products and bakery SKUs/,
-  );
-  assert.match(
-    validateOrderFields(
-      validOrder({
-        fulfillmentMode: "preorder",
-        items: [{ productId, packs: 1 }],
-      }),
-    ).error,
-    /Legacy product lines can only use legacy stock fulfillment/,
+    validateOrderFields(validOrder({
+      fulfillmentMode: "legacy_stock",
+      items: [{ variantId, packs: 1 }],
+    })).error,
+    /Choose bakery stock or preorder/,
   );
 });
 
@@ -207,7 +189,7 @@ test("order schemas enforce unique references, sale links, and payment idempoten
 
 test("bakery order lines and lot allocations preserve SKU identity and ownership", () => {
   const allocationIndexes = FinishedStockLotAllocation.schema.indexes();
-  assert.equal(Order.schema.path("fulfillmentMode").options.default, "legacy_stock");
+  assert.equal(Order.schema.path("fulfillmentMode").options.default, "bakery_stock");
   assert.equal(Order.schema.path("promisedDate").instance, "String");
   assert.equal(Order.schema.path("items").schema.path("variantId").instance, "ObjectId");
   assert.ok(allocationIndexes.some(([keys, options]) =>
@@ -216,7 +198,7 @@ test("bakery order lines and lot allocations preserve SKU identity and ownership
     keys.orderId === 1 && keys.orderLineId === 1 && keys.status === 1));
 });
 
-test("sale line snapshots accept bakery SKUs without weakening legacy line requirements", () => {
+test("sale line snapshots accept bakery SKUs", () => {
   const saleDocument = (line) =>
     new Sale({
       receiptNumber: "SAL-2026-000001",
@@ -231,7 +213,7 @@ test("sale line snapshots accept bakery SKUs without weakening legacy line requi
       actor: "507f1f77bcf86cd799439016",
     });
   const bakerySale = saleDocument({
-    variantId: productId,
+    variantId: "507f1f77bcf86cd799439015",
     productCode: "SD-LOAF",
     sku: "SD-LOAF",
     productName: "Sourdough loaf",
@@ -244,16 +226,6 @@ test("sale line snapshots accept bakery SKUs without weakening legacy line requi
     lineTotal: 24000,
   });
   assert.equal(bakerySale.validateSync(), undefined);
-  const legacySale = saleDocument({
-    productCode: "OLD-BOX",
-    productName: "Legacy product",
-    packs: 1,
-    quantityPieces: 1,
-    catalogPricePerPack: 1000,
-    pricePerPack: 1000,
-    lineTotal: 1000,
-  });
-  assert.ok(legacySale.validateSync().errors["lines.0.productId"]);
 });
 
 test("bakery order is fully allocated only when every line has its full reservation", async () => {

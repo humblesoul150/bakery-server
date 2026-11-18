@@ -44,9 +44,6 @@ test("builds role-scoped summary aggregates without returning source records", a
       aggregate: async () => [{ _id: "Pending", count: 3 }, { _id: "Completed", count: 2 }],
       countDocuments: async () => 1,
     },
-    ProductionRun: {
-      aggregate: async () => [{ _id: "2025-01-01", produced: 20, damaged: 1 }],
-    },
     RawMaterialAlert: { countDocuments: async () => 4 },
     Expense: {
       aggregate: async () => [{ _id: "2025-01-01", amount: 100 }],
@@ -68,7 +65,7 @@ test("builds role-scoped summary aggregates without returning source records", a
   assert.equal(result.sections.sales.outstanding, 200);
   assert.equal(result.sections.sales.products[0].name, "Flour");
   assert.equal(result.sections.orders.open, 3);
-  assert.equal(result.sections.production.produced, 20);
+  assert.equal(result.sections.production.produced, 0);
   assert.equal(result.sections.inventory.activeLowStock, 4);
   assert.equal(result.sections.expenses.pendingApproval, 2);
   assert.equal(result.sections.assets.dueMaintenance, 3);
