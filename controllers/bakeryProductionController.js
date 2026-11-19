@@ -15,6 +15,7 @@ const { deleteImage } = require("../configs/cloudinary");
 const { recordRawMaterialMovement } = require("../lib/productionInventory");
 const { resolveFinishedStockExpiryAlerts } = require("../lib/finishedStockExpiryAlerts");
 const { allocatePreorderOutput } = require("../lib/finishedStockLotOrders");
+const { refreshBakeryStockAlert } = require("../lib/bakeryStockAlerts");
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const MAX_INGREDIENTS = 100;
@@ -140,7 +141,7 @@ function validateVariants(value) {
   const variants = [];
   for (const variant of value) {
     if (!isRecord(variant) || Object.keys(variant).some((key) =>
-      !["sku", "name", "saleUnit", "unitsPerSaleUnit", "price", "active", "responsibleUserId", "packagingMaterials"].includes(key))) {
+      !["sku", "name", "saleUnit", "unitsPerSaleUnit", "price", "lowStockThreshold", "active", "responsibleUserId", "packagingMaterials"].includes(key))) {
       return { error: "Each sellable variant contains unsupported fields." };
     }
     const sku = typeof variant.sku === "string" ? variant.sku.trim().toUpperCase() : "";
@@ -157,6 +158,10 @@ function validateVariants(value) {
     skus.add(sku);
     if (variant.active !== undefined && typeof variant.active !== "boolean") {
       return { error: "Variant active must be true or false." };
+    }
+    if (variant.lowStockThreshold !== undefined
+      && (!Number.isSafeInteger(variant.lowStockThreshold) || variant.lowStockThreshold < 0)) {
+      return { error: "Variant low-stock threshold must be a non-negative whole number of sale units." };
     }
     if (variant.responsibleUserId !== undefined && variant.responsibleUserId !== null
       && !validId(variant.responsibleUserId)) {
@@ -184,6 +189,7 @@ function validateVariants(value) {
       saleUnit,
       unitsPerSaleUnit: units,
       price,
+      lowStockThreshold: variant.lowStockThreshold === undefined ? 10 : variant.lowStockThreshold,
       active: variant.active ?? true,
       responsibleUserId: variant.responsibleUserId || null,
       packagingMaterials: validatedPackaging,
@@ -268,7 +274,7 @@ function validateFamily(body, partial = false) {
 }
 
 function validateVariantUpdate(body) {
-  const request = validateObject(body, ["name", "price", "active"]);
+  const request = validateObject(body, ["name", "price", "lowStockThreshold", "active"]);
   if (request.error) return request;
   const value = {};
   if (own(body, "name")) {
@@ -280,6 +286,12 @@ function validateVariantUpdate(body) {
   if (own(body, "price")) {
     if (!Number.isSafeInteger(body.price) || body.price < 1) return { error: "Variant price must be a positive whole UGX amount." };
     value.price = body.price;
+  }
+  if (own(body, "lowStockThreshold")) {
+    if (!Number.isSafeInteger(body.lowStockThreshold) || body.lowStockThreshold < 0) {
+      return { error: "Variant low-stock threshold must be a non-negative whole number of sale units." };
+    }
+    value.lowStockThreshold = body.lowStockThreshold;
   }
   if (own(body, "active")) {
     if (typeof body.active !== "boolean") return { error: "Variant active must be true or false." };
@@ -620,7 +632,12 @@ async function listFamilies(_request, response) {
   const variantsByFamily = new Map();
   for (const variant of variants) {
     const key = String(variant.familyId);
-    variantsByFamily.set(key, [...(variantsByFamily.get(key) || []), serialize(variant)]);
+    variantsByFamily.set(key, [...(variantsByFamily.get(key) || []), {
+      ...serialize(variant),
+      lowStockThreshold: Number.isSafeInteger(variant.lowStockThreshold)
+        ? variant.lowStockThreshold
+        : 10,
+    }]);
   }
   const recipesById = new Map(recipes.map((recipe) => [String(recipe._id), serialize(recipe)]));
   const imageCleanupByFamily = new Map(imageCleanupCounts.map((item) => [String(item._id), item.count]));
@@ -655,6 +672,9 @@ async function createFamily(request, response) {
         createdBy: request.authUser._id,
         updatedBy: request.authUser._id,
       })), { session });
+      for (const variant of createdVariants) {
+        await refreshBakeryStockAlert(variant._id, request.authUser._id, { session });
+      }
       await audit.recordAudit({
         request,
         eventType: "production.bakery_family_created",
@@ -745,6 +765,15 @@ async function updateFamily(request, response) {
       }
       Object.assign(record, updates, { updatedBy: request.authUser._id });
       await record.save({ session });
+      if (own(updates, "active")) {
+        const variants = await BakeryProductVariant.find({ familyId: record._id })
+          .select("_id")
+          .session(session)
+          .lean();
+        for (const variant of variants) {
+          await refreshBakeryStockAlert(variant._id, request.authUser._id, { session });
+        }
+      }
       await audit.recordAudit({
         request,
         eventType: wasPublished === willBePublished
@@ -833,6 +862,7 @@ async function addVariant(request, response) {
         createdBy: request.authUser._id,
         updatedBy: request.authUser._id,
       }], { session });
+      await refreshBakeryStockAlert(created._id, request.authUser._id, { session });
       await audit.recordAudit({
         request,
         eventType: "production.bakery_variant_created",
@@ -870,6 +900,7 @@ async function updateVariant(request, response) {
       }
       Object.assign(current, value, { updatedBy: request.authUser._id });
       await current.save({ session });
+      await refreshBakeryStockAlert(current._id, request.authUser._id, { session });
       await audit.recordAudit({
         request,
         eventType: "production.bakery_variant_updated",
@@ -1192,6 +1223,7 @@ async function completeBatch(request, response) {
             allocations,
           });
         }
+        await refreshBakeryStockAlert(variant._id, request.authUser._id, { session });
       }
       batch.ingredients = batch.ingredients.map((line) => ({
         ...line.toObject(),
@@ -1313,6 +1345,7 @@ async function receiveLot(request, response) {
         details: { lotId: String(lot._id), familyId: String(family._id), variantId: String(variant._id), quantity: value.quantity, location: value.location, reason: value.reason },
         transaction: session,
       });
+      await refreshBakeryStockAlert(variant._id, request.authUser._id, { session });
       return { lot: serialize(lot), movement: serialize(movement), replayed: false };
     });
     return response.status(200).json(result);
@@ -1374,6 +1407,7 @@ async function adjustLot(request, response) {
         actor: request.authUser._id,
       }], { session });
       if (lot.status !== "active") await resolveFinishedStockExpiryAlerts(lot._id, new Date(), session);
+      await refreshBakeryStockAlert(lot.variantId, request.authUser._id, { session });
       await audit.recordAudit({
         request,
         eventType: "production.bakery_lot_adjusted",
@@ -1441,6 +1475,7 @@ async function writeOffLot(request, response) {
         actor: request.authUser._id,
       }], { session });
       if (lot.status !== "active") await resolveFinishedStockExpiryAlerts(lot._id, new Date(), session);
+      await refreshBakeryStockAlert(lot.variantId, request.authUser._id, { session });
       await audit.recordAudit({
         request,
         eventType: "production.bakery_lot_written_off",

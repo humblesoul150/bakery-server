@@ -11,6 +11,7 @@ const audit = require("../lib/audit");
 const BakeryProductVariant = require("../models/bakeryProductVariant");
 const BakeryProductFamily = require("../models/bakeryProductFamily");
 const { dispatchBakerySaleLots } = require("../lib/finishedStockLotSales");
+const { refreshBakeryStockAlert } = require("../lib/bakeryStockAlerts");
 
 const PAYMENT_TERMS = ["Paid now", "Same-day", "Credit"];
 const SALE_ROLES = ["Sales Manager", "General Manager", "Super Admin"];
@@ -587,6 +588,9 @@ async function createSale(request, response) {
           actorId: actorId(request),
           session,
         });
+      }
+      for (const variantId of new Set(saleLines.map((line) => String(line.variantId)))) {
+        await refreshBakeryStockAlert(variantId, actorId(request), { session });
       }
       const payments = [];
       if (value.initialPaymentAmount > 0) {

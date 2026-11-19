@@ -23,6 +23,7 @@ const {
   reserveBakeryStockOrder,
 } = require("../lib/finishedStockLotOrders");
 const { enqueueOrderNotification } = require("../lib/orderNotifications");
+const { stockStateFor } = require("../lib/bakeryStockAlerts");
 const {
   decodeKeysetCursor,
   encodeKeysetCursor,
@@ -471,6 +472,15 @@ async function listBakeryOrderCatalog(_request, response) {
       unitsPerSaleUnit: variant.unitsPerSaleUnit,
       price: variant.price,
       availableQuantity: Math.max(0, quantityByVariant.get(String(variant._id)) || 0),
+      lowStockThreshold: Number.isSafeInteger(variant.lowStockThreshold)
+        ? variant.lowStockThreshold
+        : 10,
+      stockState: stockStateFor(
+        Math.max(0, quantityByVariant.get(String(variant._id)) || 0),
+        Number.isSafeInteger(variant.lowStockThreshold)
+          ? variant.lowStockThreshold
+          : 10,
+      ),
     })),
   });
 }

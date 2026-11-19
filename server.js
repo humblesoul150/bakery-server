@@ -6,6 +6,7 @@ const { generateCreditReminders } = require("./lib/creditReminders");
 const { generateLeaveReminders } = require("./lib/leaveReminders");
 const { generateFinishedStockExpiryAlerts } = require("./lib/finishedStockExpiryAlerts");
 const { generateRawMaterialLotExpiryAlerts } = require("./lib/rawMaterialLotExpiryAlerts");
+const { generateBakeryStockAlerts } = require("./lib/bakeryStockAlerts");
 const { processNotificationOutbox } = require("./lib/notificationEvents");
 const { initializeNotificationSockets } = require("./lib/notificationSockets");
 
@@ -16,6 +17,7 @@ async function startServer() {
   await generateLeaveReminders();
   await generateFinishedStockExpiryAlerts();
   await generateRawMaterialLotExpiryAlerts();
+  await generateBakeryStockAlerts();
   await processNotificationOutbox();
   const app = createApp(config);
   const server = http.createServer(app);
@@ -36,6 +38,12 @@ async function startServer() {
     }
   }, 24 * 60 * 60 * 1000);
   reminderTimer.unref();
+  const bakeryStockAlertTimer = setInterval(() => {
+    generateBakeryStockAlerts().catch((error) => {
+      console.error("Bakery stock alert reconciliation failed:", error);
+    });
+  }, 5 * 60 * 1000);
+  bakeryStockAlertTimer.unref();
   const outboxTimer = setInterval(() => {
     processNotificationOutbox().catch((error) => {
       console.error("Notification outbox processing failed:", error);

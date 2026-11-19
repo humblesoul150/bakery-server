@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { AUDIT_EVENT_TYPES } = require("../models/auditEvent");
+const BakeryProductVariant = require("../models/bakeryProductVariant");
 const routes = require("../routes/production");
 const uploadRoutes = require("../routes/uploads");
 const {
@@ -23,6 +24,11 @@ const familyId = "507f1f77bcf86cd799439011";
 const materialId = "507f1f77bcf86cd799439012";
 const variantId = "507f1f77bcf86cd799439013";
 
+test("bakery sellable variants default to a whole-number low-stock threshold of 10 sale units", () => {
+  assert.equal(BakeryProductVariant.schema.path("lowStockThreshold").options.default, 10);
+  assert.equal(new BakeryProductVariant().lowStockThreshold, 10);
+});
+
 test("bakery family validation accepts optional bakery defaults and rejects unsafe catalog fields", () => {
   const result = validateFamily({
     code: "BREAD",
@@ -39,6 +45,15 @@ test("bakery family validation accepts optional bakery defaults and rejects unsa
     }],
   });
   assert.equal(result.error, undefined);
+  assert.equal(result.value.variants[0].lowStockThreshold, 10);
+  assert.equal(validateFamily({
+    ...result.value,
+    variants: [{ ...result.value.variants[0], lowStockThreshold: 24 }],
+  }).value.variants[0].lowStockThreshold, 24);
+  assert.match(validateFamily({
+    ...result.value,
+    variants: [{ ...result.value.variants[0], lowStockThreshold: -1 }],
+  }).error, /non-negative whole number/);
   assert.equal(validateFamily({
     code: "bread",
     name: "Sourdough",
@@ -239,11 +254,14 @@ test("manual bakery stock receipts and lot adjustments require traceable, idempo
 });
 
 test("sellable variant updates allow price and status changes without permitting SKU rewrites", () => {
-  assert.deepEqual(validateVariantUpdate({ name: "Family loaf", price: 6000, active: false }).value, {
+  assert.deepEqual(validateVariantUpdate({ name: "Family loaf", price: 6000, lowStockThreshold: 15, active: false }).value, {
     name: "Family loaf",
     price: 6000,
+    lowStockThreshold: 15,
     active: false,
   });
+  assert.match(validateVariantUpdate({ lowStockThreshold: -1 }).error, /non-negative whole number/);
+  assert.match(validateVariantUpdate({ lowStockThreshold: 1.5 }).error, /non-negative whole number/);
   assert.match(validateVariantUpdate({ sku: "RENAMED-SKU" }).error, /supported by this bakery production request/);
   assert.match(validateVariantUpdate({ price: 1.5 }).error, /positive whole UGX/);
 });

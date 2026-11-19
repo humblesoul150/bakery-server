@@ -18,6 +18,7 @@ const bakeryProductVariantSchema = new mongoose.Schema(
     saleUnit: { type: String, required: true, trim: true, maxlength: 40 },
     unitsPerSaleUnit: { type: Number, required: true, min: 1, validate: Number.isInteger },
     price: { type: Number, required: true, min: 1, validate: Number.isInteger },
+    lowStockThreshold: { type: Number, required: true, min: 0, default: 10, validate: Number.isSafeInteger },
     packagingMaterials: { type: [packagingMaterialSchema], default: [] },
     active: { type: Boolean, default: true, index: true },
     responsibleUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
